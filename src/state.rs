@@ -37,6 +37,25 @@ pub struct AssetState {
 }
 
 impl StateManager {
+    /// Create a new StateManager
+    ///
+    /// Initializes the state manager with an empty state, default tokenomics, and economy.
+    ///
+    /// # Arguments
+    /// * `config` - Configuration for the node, including database path
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be opened.
+    ///
+    /// # Example
+    /// ```
+    /// use haze::config::Config;
+    /// use haze::state::StateManager;
+    ///
+    /// let config = Config::default();
+    /// let state_manager = StateManager::new(&config).unwrap();
+    /// assert_eq!(state_manager.current_height(), 0);
+    /// ```
     pub fn new(config: &Config) -> Result<Self> {
         let db = sled::open(&config.storage.db_path)
             .map_err(|e| HazeError::Database(format!("Failed to open database: {}", e)))?;
@@ -52,12 +71,40 @@ impl StateManager {
         })
     }
 
-    /// Get account state
+    /// Get account state by address
+    ///
+    /// # Arguments
+    /// * `address` - The account address
+    ///
+    /// # Returns
+    /// `Some(AccountState)` if the account exists, `None` otherwise.
+    ///
+    /// # Example
+    /// ```
+    /// use haze::crypto::KeyPair;
+    /// use haze::state::StateManager;
+    /// use haze::config::Config;
+    ///
+    /// let config = Config::default();
+    /// let state = StateManager::new(&config)?;
+    /// let keypair = KeyPair::generate();
+    /// let address = keypair.address();
+    ///
+    /// // New account doesn't exist yet
+    /// assert!(state.get_account(&address).is_none());
+    /// # Ok::<(), haze::error::HazeError>(())
+    /// ```
     pub fn get_account(&self, address: &Address) -> Option<AccountState> {
         self.accounts.get(address).map(|v| v.clone())
     }
 
-    /// Get asset state
+    /// Get asset state by asset ID
+    ///
+    /// # Arguments
+    /// * `asset_id` - The asset identifier (hash)
+    ///
+    /// # Returns
+    /// `Some(AssetState)` if the asset exists, `None` otherwise.
     pub fn get_asset(&self, asset_id: &Hash) -> Option<AssetState> {
         self.assets.get(asset_id).map(|v| v.clone())
     }

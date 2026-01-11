@@ -21,7 +21,7 @@ pub struct ConsensusEngine {
     state: Arc<StateManager>,
     
     // DAG structure
-    dag: Arc<RwLock<DAG>>,
+    dag: Arc<RwLock<Dag>>,
     
     // Haze Committees
     committees: Arc<RwLock<HashMap<u64, Committee>>>,
@@ -36,18 +36,21 @@ pub struct ConsensusEngine {
 }
 
 /// DAG structure for Fog Consensus
-struct DAG {
-    vertices: HashMap<Hash, DAGVertex>,
+#[allow(dead_code)] // Fields will be used in full implementation
+struct Dag {
+    vertices: HashMap<Hash, DagVertex>,
     edges: HashMap<Hash, Vec<Hash>>,
 }
 
-struct DAGVertex {
+#[allow(dead_code)] // Fields will be used in full implementation
+struct DagVertex {
     block: Block,
     references: Vec<Hash>,
     wave: u64,
 }
 
 /// Haze Committee - dynamic validator group
+#[allow(dead_code)] // Fields will be used in full implementation
 struct Committee {
     id: u64,
     validators: Vec<Address>,
@@ -57,6 +60,7 @@ struct Committee {
 }
 
 /// Wave for finalization
+#[allow(dead_code)] // Fields will be used in full implementation
 struct Wave {
     number: u64,
     blocks: HashSet<Hash>,
@@ -69,7 +73,7 @@ impl ConsensusEngine {
         let mut engine = Self {
             config: config.clone(),
             state,
-            dag: Arc::new(RwLock::new(DAG {
+            dag: Arc::new(RwLock::new(Dag {
                 vertices: HashMap::new(),
                 edges: HashMap::new(),
             })),
@@ -207,9 +211,9 @@ impl ConsensusEngine {
         let mut highest_finalized_wave: Option<u64> = None;
         for (wave_num, wave) in waves.iter() {
             if wave.finalized {
-                if highest_finalized_wave.is_none() || *wave_num > highest_finalized_wave.unwrap() {
-                    highest_finalized_wave = Some(*wave_num);
-                }
+            if highest_finalized_wave.map_or(true, |h| *wave_num > h) {
+                highest_finalized_wave = Some(*wave_num);
+            }
             }
         }
         
@@ -299,7 +303,7 @@ impl ConsensusEngine {
         // Add to DAG
         {
             let mut dag = self.dag.write();
-            let vertex = DAGVertex {
+            let vertex = DagVertex {
                 block: block.clone(),
                 references: block.dag_references.clone(),
                 wave: block.header.wave_number,

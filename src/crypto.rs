@@ -13,6 +13,14 @@ pub struct KeyPair {
 
 impl KeyPair {
     /// Generate new key pair
+    ///
+    /// # Example
+    /// ```
+    /// use haze::crypto::KeyPair;
+    ///
+    /// let keypair = KeyPair::generate();
+    /// let address = keypair.address();
+    /// ```
     pub fn generate() -> Self {
         let mut csprng = OsRng;
         let mut secret_bytes = [0u8; 32];
@@ -22,6 +30,17 @@ impl KeyPair {
     }
 
     /// Get public key as address
+    ///
+    /// Returns a 32-byte address derived from the public key.
+    ///
+    /// # Example
+    /// ```
+    /// use haze::crypto::KeyPair;
+    ///
+    /// let keypair = KeyPair::generate();
+    /// let address = keypair.address();
+    /// assert_eq!(address.len(), 32);
+    /// ```
     pub fn address(&self) -> Address {
         let verifying_key = self.signing_key.verifying_key();
         let bytes = verifying_key.to_bytes();
@@ -30,18 +49,67 @@ impl KeyPair {
         address
     }
 
-    /// Sign data
+    /// Sign data with this key pair
+    ///
+    /// # Arguments
+    /// * `data` - The data to sign
+    ///
+    /// # Returns
+    /// A 64-byte ED25519 signature
+    ///
+    /// # Example
+    /// ```
+    /// use haze::crypto::{KeyPair, verify_signature};
+    ///
+    /// let keypair = KeyPair::generate();
+    /// let message = b"Hello, HAZE!";
+    /// let signature = keypair.sign(message);
+    /// let public_key = keypair.verifying_key().to_bytes();
+    ///
+    /// assert!(verify_signature(&public_key, message, &signature).unwrap());
+    /// ```
     pub fn sign(&self, data: &[u8]) -> Vec<u8> {
         self.signing_key.sign(data).to_bytes().to_vec()
     }
 
-    /// Get verifying key
+    /// Get the verifying key (public key)
+    ///
+    /// # Example
+    /// ```
+    /// use haze::crypto::KeyPair;
+    ///
+    /// let keypair = KeyPair::generate();
+    /// let verifying_key = keypair.verifying_key();
+    /// let public_key_bytes = verifying_key.to_bytes();
+    /// assert_eq!(public_key_bytes.len(), 32);
+    /// ```
     pub fn verifying_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
     }
 }
 
-/// Verify signature
+/// Verify a signature
+///
+/// # Arguments
+/// * `public_key` - The public key (32 bytes)
+/// * `message` - The original message that was signed
+/// * `signature` - The signature to verify (64 bytes)
+///
+/// # Returns
+/// `Ok(true)` if the signature is valid, `Ok(false)` if invalid, or an error if the inputs are malformed.
+///
+/// # Example
+/// ```
+/// use haze::crypto::{KeyPair, verify_signature};
+///
+/// let keypair = KeyPair::generate();
+/// let message = b"Hello, HAZE!";
+/// let signature = keypair.sign(message);
+/// let public_key = keypair.verifying_key().to_bytes();
+///
+/// assert!(verify_signature(&public_key, message, &signature).unwrap());
+/// assert!(!verify_signature(&public_key, b"Wrong message", &signature).unwrap());
+/// ```
 pub fn verify_signature(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<bool> {
     let verifying_key = VerifyingKey::from_bytes(
         public_key.try_into()

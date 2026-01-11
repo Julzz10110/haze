@@ -33,7 +33,9 @@ pub enum NetworkEvent {
 pub struct Network {
     event_sender: mpsc::UnboundedSender<NetworkEvent>,
     _event_receiver: mpsc::UnboundedReceiver<NetworkEvent>,
+    #[allow(dead_code)] // Will be used in full libp2p implementation
     config: Config,
+    #[allow(dead_code)] // Will be used in full libp2p implementation
     consensus: Arc<ConsensusEngine>,
 }
 

@@ -69,7 +69,7 @@ impl HazeVM {
 
         // Compile WASM module
         let module = Module::new(&self.engine, wasm_code)
-            .map_err(|e| HazeError::VM(format!("Failed to compile WASM: {}", e)))?;
+            .map_err(|e| HazeError::VM(format!("Failed to compile WASM: {e}")))?;
 
         // Create store with gas metering
         let mut store = Store::new(&self.engine, ());
@@ -86,12 +86,12 @@ impl HazeVM {
 
         // Instantiate module
         let instance = Instance::new(&mut store, &module, &[])
-            .map_err(|e| HazeError::VM(format!("Failed to instantiate module: {}", e)))?;
+            .map_err(|e| HazeError::VM(format!("Failed to instantiate module: {e}")))?;
 
         // Get function
         let _func = instance
             .get_func(&mut store, method)
-            .ok_or_else(|| HazeError::VM(format!("Function {} not found", method)))?;
+            .ok_or_else(|| HazeError::VM(format!("Function {method} not found")))?;
 
         // Check gas for function call
         if context.gas_used + CALL_GAS_COST > context.gas_limit {
