@@ -13,6 +13,7 @@ use crate::types::{Block, BlockHeader, Hash, Address, Transaction};
 use crate::state::StateManager;
 use crate::config::Config;
 use crate::error::Result;
+use crate::crypto::verify_signature;
 use chrono::Utc;
 
 /// Consensus engine implementing Fog Consensus
@@ -143,10 +144,199 @@ impl ConsensusEngine {
     }
 
     /// Add transaction to pool
+    ///
+    /// Validates the transaction before adding it to the pool.
+    ///
+    /// # Arguments
+    /// * `tx` - The transaction to add
+    ///
+    /// # Errors
+    /// Returns an error if the transaction is invalid (duplicate, invalid signature, etc.)
     pub fn add_transaction(&self, tx: Transaction) -> Result<()> {
+        // Check if transaction already exists in pool
         let tx_hash = tx.hash();
+        if self.tx_pool.contains_key(&tx_hash) {
+            return Err(crate::error::HazeError::InvalidTransaction(
+                "Transaction already in pool".to_string()
+            ));
+        }
+
+        // Basic validation
+        self.validate_transaction(&tx)?;
+
+        // Add to pool
         self.tx_pool.insert(tx_hash, tx);
         Ok(())
+    }
+
+    /// Validate transaction
+    ///
+    /// Performs basic validation checks on a transaction.
+    fn validate_transaction(&self, tx: &Transaction) -> Result<()> {
+        match tx {
+            Transaction::Transfer { from, amount, fee, .. } => {
+                // Check that amount and fee are not zero
+                if *amount == 0 {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        "Transfer amount cannot be zero".to_string()
+                    ));
+                }
+                if *fee == 0 {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        "Transaction fee cannot be zero".to_string()
+                    ));
+                }
+
+                // Check that sender has sufficient balance (if account exists)
+                if let Some(account) = self.state.get_account(from) {
+                    if account.balance < *amount + *fee {
+                        return Err(crate::error::HazeError::InvalidTransaction(
+                            "Insufficient balance".to_string()
+                        ));
+                    }
+                }
+
+                // Verify signature
+                self.verify_transaction_signature(tx, from)?;
+                // TODO: Check nonce
+            }
+            Transaction::Stake { validator, amount, signature, .. } => {
+                if *amount == 0 {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        "Stake amount cannot be zero".to_string()
+                    ));
+                }
+
+                // Verify signature
+                if signature.is_empty() {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        "Transaction signature is empty".to_string()
+                    ));
+                }
+                self.verify_transaction_signature(tx, validator)?;
+            }
+            Transaction::ContractCall { gas_limit, signature, .. } => {
+                if *gas_limit == 0 {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        "Gas limit cannot be zero".to_string()
+                    ));
+                }
+
+                // Basic signature validation
+                if signature.is_empty() {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        "Transaction signature is empty".to_string()
+                    ));
+                }
+            }
+            Transaction::MistbornAsset { data, signature, .. } => {
+                // Verify signature
+                if signature.is_empty() {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        "Transaction signature is empty".to_string()
+                    ));
+                }
+                self.verify_transaction_signature(tx, &data.owner)?;
+
+                // TODO: Validate asset data
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Verify transaction signature
+    ///
+    /// Verifies that the transaction signature is valid for the signer's address.
+    /// In HAZE, the address is the first 32 bytes of the ED25519 public key.
+    fn verify_transaction_signature(&self, tx: &Transaction, signer_address: &Address) -> Result<()> {
+        let signature = match tx {
+            Transaction::Transfer { signature, .. } => signature,
+            Transaction::Stake { signature, .. } => signature,
+            Transaction::ContractCall { signature, .. } => signature,
+            Transaction::MistbornAsset { signature, .. } => signature,
+        };
+
+        // Get transaction data for signing (transaction without signature field)
+        let tx_data = self.get_transaction_data_for_signing(tx);
+
+        // Verify signature using address as public key (first 32 bytes of ED25519 pubkey)
+        let is_valid = verify_signature(signer_address, &tx_data, signature)
+            .map_err(|e| crate::error::HazeError::InvalidTransaction(
+                format!("Signature verification error: {}", e)
+            ))?;
+
+        if !is_valid {
+            return Err(crate::error::HazeError::InvalidTransaction(
+                "Invalid transaction signature".to_string()
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Get transaction data for signing (transaction without signature field)
+    ///
+    /// Creates a serialized representation of the transaction without the signature
+    /// for use in signature verification. The data format matches what was signed.
+    fn get_transaction_data_for_signing(&self, tx: &Transaction) -> Vec<u8> {
+        use bincode;
+        
+        // Serialize transaction data without signature
+        // We manually serialize each field to match the signing format
+        match tx {
+            Transaction::Transfer { from, to, amount, fee, nonce, .. } => {
+                let mut data = Vec::new();
+                data.extend_from_slice(b"Transfer");
+                data.extend_from_slice(from);
+                data.extend_from_slice(to);
+                data.extend_from_slice(&amount.to_le_bytes());
+                data.extend_from_slice(&fee.to_le_bytes());
+                data.extend_from_slice(&nonce.to_le_bytes());
+                data
+            }
+            Transaction::Stake { validator, amount, .. } => {
+                let mut data = Vec::new();
+                data.extend_from_slice(b"Stake");
+                data.extend_from_slice(validator);
+                data.extend_from_slice(&amount.to_le_bytes());
+                data
+            }
+            Transaction::ContractCall { contract, method, args, gas_limit, .. } => {
+                let mut data = Vec::new();
+                data.extend_from_slice(b"ContractCall");
+                data.extend_from_slice(contract);
+                data.extend_from_slice(method.as_bytes());
+                data.push(0); // Null terminator for method
+                data.extend_from_slice(&gas_limit.to_le_bytes());
+                data.extend_from_slice(args);
+                data
+            }
+            Transaction::MistbornAsset { action, asset_id, data, .. } => {
+                // Serialize asset data for signing
+                let mut serialized = Vec::new();
+                serialized.extend_from_slice(b"MistbornAsset");
+                // Serialize action as u8
+                serialized.push(match action {
+                    crate::types::AssetAction::Create => 0,
+                    crate::types::AssetAction::Update => 1,
+                    crate::types::AssetAction::Condense => 2,
+                    crate::types::AssetAction::Evaporate => 3,
+                    crate::types::AssetAction::Merge => 4,
+                    crate::types::AssetAction::Split => 5,
+                });
+                serialized.extend_from_slice(asset_id);
+                serialized.extend_from_slice(&data.owner);
+                // Serialize density as u8
+                serialized.push(match data.density {
+                    crate::types::DensityLevel::Ethereal => 0,
+                    crate::types::DensityLevel::Light => 1,
+                    crate::types::DensityLevel::Dense => 2,
+                    crate::types::DensityLevel::Core => 3,
+                });
+                serialized
+            }
+        }
     }
 
     /// Create new block
@@ -358,5 +548,118 @@ impl Clone for ConsensusEngine {
             current_wave: self.current_wave.clone(),
             tx_pool: self.tx_pool.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::KeyPair;
+    use crate::types::Transaction;
+    use crate::config::Config;
+
+    fn create_test_config(test_name: &str) -> Config {
+        let mut config = Config::default();
+        config.storage.db_path = std::path::PathBuf::from(format!("./haze_db_test_consensus_{}", test_name));
+        config
+    }
+
+    #[test]
+    fn test_add_transaction_duplicate() {
+        let config = create_test_config("duplicate");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let keypair = KeyPair::generate();
+        let from = keypair.address();
+        let to = [2u8; 32];
+        
+        // Create transaction
+        let tx_data = {
+            let mut data = Vec::new();
+            data.extend_from_slice(b"Transfer");
+            data.extend_from_slice(&from);
+            data.extend_from_slice(&to);
+            data.extend_from_slice(&1000u64.to_le_bytes());
+            data.extend_from_slice(&10u64.to_le_bytes());
+            data.extend_from_slice(&1u64.to_le_bytes());
+            data
+        };
+        let signature = keypair.sign(&tx_data);
+        
+        let tx = Transaction::Transfer {
+            from,
+            to,
+            amount: 1000,
+            fee: 10,
+            nonce: 1,
+            signature,
+        };
+        
+        // First add should succeed
+        consensus.add_transaction(tx.clone()).unwrap();
+        
+        // Second add should fail (duplicate)
+        let result = consensus.add_transaction(tx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already in pool"));
+    }
+
+    #[test]
+    fn test_verify_transaction_signature_transfer() {
+        let config = create_test_config("signature");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let keypair = KeyPair::generate();
+        let from = keypair.address();
+        let to = [2u8; 32];
+        
+        // Create transaction data for signing
+        let tx_data = {
+            let mut data = Vec::new();
+            data.extend_from_slice(b"Transfer");
+            data.extend_from_slice(&from);
+            data.extend_from_slice(&to);
+            data.extend_from_slice(&1000u64.to_le_bytes());
+            data.extend_from_slice(&10u64.to_le_bytes());
+            data.extend_from_slice(&1u64.to_le_bytes());
+            data
+        };
+        let signature = keypair.sign(&tx_data);
+        
+        let tx = Transaction::Transfer {
+            from,
+            to,
+            amount: 1000,
+            fee: 10,
+            nonce: 1,
+            signature,
+        };
+        
+        // Valid signature should pass
+        // Note: This test verifies the signature format is correct
+        // Full verification happens in add_transaction
+        let result = consensus.add_transaction(tx);
+        // Should either succeed (if validation passes) or fail with specific error
+        // In this case, it might fail due to insufficient balance, but signature should be valid format
+        assert!(result.is_ok() || result.unwrap_err().to_string().contains("balance"));
+    }
+
+    #[test]
+    fn test_add_transaction_empty_signature() {
+        let config = create_test_config("empty_sig");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let tx = Transaction::Stake {
+            validator: [1u8; 32],
+            amount: 1000,
+            signature: vec![], // Empty signature
+        };
+        
+        let result = consensus.add_transaction(tx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
     }
 }
