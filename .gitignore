@@ -1,1 +1,22 @@
 /target
+Cargo.lock
+
+# Database files (production and test databases)
+/haze_db
+/haze_db_*
+*.db
+*.db-shm
+*.db-wal
+
+# Test databases created during test runs
+haze_db_test_*
+
+# Config files (may contain sensitive data)
+haze_config.json
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+*~

@@ -153,3 +153,84 @@ impl Transaction {
         sha256(&data)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sha256_hash() {
+        let data = b"Hello, HAZE!";
+        let hash = sha256(data);
+        
+        // Hash should not be all zeros
+        assert_ne!(hash, [0u8; 32]);
+        
+        // Same input should produce same hash
+        let hash2 = sha256(data);
+        assert_eq!(hash, hash2);
+        
+        // Different input should produce different hash
+        let hash3 = sha256(b"Different data");
+        assert_ne!(hash, hash3);
+    }
+
+    #[test]
+    fn test_hash_to_hex_and_back() {
+        let original_hash = sha256(b"test data");
+        let hex_string = hash_to_hex(&original_hash);
+        
+        // Should be able to convert back
+        let restored_hash = hex_to_hash(&hex_string).unwrap();
+        assert_eq!(original_hash, restored_hash);
+    }
+
+    #[test]
+    fn test_transaction_hash() {
+        let tx = Transaction::Transfer {
+            from: [1u8; 32],
+            to: [2u8; 32],
+            amount: 1000,
+            fee: 10,
+            nonce: 1,
+            signature: vec![],
+        };
+        
+        let hash1 = tx.hash();
+        let hash2 = tx.hash();
+        
+        // Same transaction should have same hash
+        assert_eq!(hash1, hash2);
+        assert_ne!(hash1, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_density_level_max_size() {
+        assert_eq!(DensityLevel::Ethereal.max_size(), 5 * 1024);
+        assert_eq!(DensityLevel::Light.max_size(), 50 * 1024);
+        assert_eq!(DensityLevel::Dense.max_size(), 5 * 1024 * 1024);
+        assert_eq!(DensityLevel::Core.max_size(), 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_block_header_compute_hash() {
+        let header = BlockHeader {
+            hash: [0; 32],
+            parent_hash: [1; 32],
+            height: 1,
+            timestamp: 1000,
+            validator: [2; 32],
+            merkle_root: [3; 32],
+            state_root: [4; 32],
+            wave_number: 0,
+            committee_id: 1,
+        };
+        
+        let hash = header.compute_hash();
+        assert_ne!(hash, [0u8; 32]);
+        
+        // Hash should be consistent
+        let hash2 = header.compute_hash();
+        assert_eq!(hash, hash2);
+    }
+}

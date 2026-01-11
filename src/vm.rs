@@ -46,14 +46,43 @@ impl HazeVM {
         wasm_code: &[u8],
         method: &str,
         _args: &[u8],
-        _context: ExecutionContext,
+        mut context: ExecutionContext,
     ) -> Result<Vec<u8>> {
+        // Check gas limit
+        if context.gas_limit == 0 {
+            return Err(HazeError::VM("Gas limit is zero".to_string()));
+        }
+
+        // Basic gas cost for compilation (estimate)
+        const COMPILE_GAS_COST: u64 = 1000;
+        const INSTANTIATE_GAS_COST: u64 = 500;
+        const CALL_GAS_COST: u64 = 100;
+
+        if context.gas_used + COMPILE_GAS_COST > context.gas_limit {
+            return Err(HazeError::VM(format!(
+                "Gas limit exceeded: {} > {}",
+                context.gas_used + COMPILE_GAS_COST,
+                context.gas_limit
+            )));
+        }
+        context.gas_used += COMPILE_GAS_COST;
+
         // Compile WASM module
         let module = Module::new(&self.engine, wasm_code)
             .map_err(|e| HazeError::VM(format!("Failed to compile WASM: {}", e)))?;
 
         // Create store with gas metering
         let mut store = Store::new(&self.engine, ());
+
+        // Check gas for instantiation
+        if context.gas_used + INSTANTIATE_GAS_COST > context.gas_limit {
+            return Err(HazeError::VM(format!(
+                "Gas limit exceeded during instantiation: {} > {}",
+                context.gas_used + INSTANTIATE_GAS_COST,
+                context.gas_limit
+            )));
+        }
+        context.gas_used += INSTANTIATE_GAS_COST;
 
         // Instantiate module
         let instance = Instance::new(&mut store, &module, &[])
@@ -64,9 +93,23 @@ impl HazeVM {
             .get_func(&mut store, method)
             .ok_or_else(|| HazeError::VM(format!("Function {} not found", method)))?;
 
-        // Call function
-        // TODO: Implement proper gas metering and state management
-        // For now, this is a placeholder
+        // Check gas for function call
+        if context.gas_used + CALL_GAS_COST > context.gas_limit {
+            return Err(HazeError::VM(format!(
+                "Gas limit exceeded during function call: {} > {}",
+                context.gas_used + CALL_GAS_COST,
+                context.gas_limit
+            )));
+        }
+        context.gas_used += CALL_GAS_COST;
+
+        // TODO: Actually call the function and track gas usage
+        // For now, this is a placeholder implementation
+        // In a full implementation, we would:
+        // 1. Use wasmtime's fuel API for precise gas tracking
+        // 2. Call the function with proper arguments
+        // 3. Handle return values
+        // 4. Track state changes
 
         Ok(vec![])
     }

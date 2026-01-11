@@ -66,3 +66,94 @@ pub fn address_from_public_key(public_key: &[u8]) -> Address {
     }
     address
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_keypair_generation() {
+        let keypair = KeyPair::generate();
+        let address = keypair.address();
+        
+        // Address should not be all zeros
+        assert_ne!(address, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_keypair_unique_addresses() {
+        let keypair1 = KeyPair::generate();
+        let keypair2 = KeyPair::generate();
+        
+        let address1 = keypair1.address();
+        let address2 = keypair2.address();
+        
+        // Different keypairs should have different addresses
+        assert_ne!(address1, address2);
+    }
+
+    #[test]
+    fn test_keypair_sign_and_verify() {
+        let keypair = KeyPair::generate();
+        let message = b"Hello, HAZE!";
+        
+        // Sign message
+        let signature = keypair.sign(message);
+        assert_eq!(signature.len(), 64); // ED25519 signature is 64 bytes
+        
+        // Get public key
+        let verifying_key = keypair.verifying_key();
+        let public_key = verifying_key.to_bytes();
+        
+        // Verify signature
+        let is_valid = verify_signature(&public_key, message, &signature).unwrap();
+        assert!(is_valid);
+    }
+
+    #[test]
+    fn test_keypair_sign_and_verify_wrong_message() {
+        let keypair = KeyPair::generate();
+        let message = b"Hello, HAZE!";
+        let wrong_message = b"Wrong message";
+        
+        // Sign message
+        let signature = keypair.sign(message);
+        
+        // Get public key
+        let verifying_key = keypair.verifying_key();
+        let public_key = verifying_key.to_bytes();
+        
+        // Verify with wrong message
+        let is_valid = verify_signature(&public_key, wrong_message, &signature).unwrap();
+        assert!(!is_valid);
+    }
+
+    #[test]
+    fn test_verify_signature_invalid_signature() {
+        // Create a valid keypair first
+        let keypair = KeyPair::generate();
+        let verifying_key = keypair.verifying_key();
+        let valid_public_key = verifying_key.to_bytes();
+        
+        // Use wrong signature (all zeros)
+        let message = b"test";
+        let invalid_signature = [0u8; 64];
+        
+        // Should return Ok(false) for invalid signature
+        let result = verify_signature(&valid_public_key, message, &invalid_signature).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_address_from_public_key() {
+        let keypair = KeyPair::generate();
+        let verifying_key = keypair.verifying_key();
+        let public_key = verifying_key.to_bytes();
+        
+        let address1 = keypair.address();
+        let address2 = address_from_public_key(&public_key);
+        
+        // Address should be consistent
+        assert_eq!(address1, address2);
+    }
+}
