@@ -198,7 +198,9 @@ impl ConsensusEngine {
 
                 // Verify signature
                 self.verify_transaction_signature(tx, from)?;
-                // TODO: Check nonce
+                
+                // Check nonce
+                self.validate_nonce(tx)?;
             }
             Transaction::Stake { validator, amount, signature, .. } => {
                 if *amount == 0 {
@@ -275,12 +277,78 @@ impl ConsensusEngine {
         Ok(())
     }
 
+    /// Validate transaction nonce
+    ///
+    /// Checks that the transaction nonce is correct for the sender account.
+    /// Nonce must be sequential: for existing accounts it must be current_nonce + 1,
+    /// considering pending transactions in the pool. For new accounts it must be 0.
+    ///
+    /// # Arguments
+    /// * `tx` - The transaction to validate
+    ///
+    /// # Errors
+    /// Returns an error if the nonce is invalid (too low, too high, or duplicate).
+    fn validate_nonce(&self, tx: &Transaction) -> Result<()> {
+        let (from_address, tx_nonce) = match tx {
+            Transaction::Transfer { from, nonce, .. } => (*from, *nonce),
+            _ => {
+                // Nonce validation only applies to Transfer transactions
+                return Ok(());
+            }
+        };
+
+        // Get current account nonce (0 for new accounts)
+        let current_nonce = self.state
+            .get_account(&from_address)
+            .map(|acc| acc.nonce)
+            .unwrap_or(0);
+
+        // Get expected nonce considering pending transactions in pool
+        let expected_nonce = self.get_expected_nonce(&from_address, current_nonce);
+
+        if tx_nonce != expected_nonce {
+            return Err(crate::error::HazeError::InvalidTransaction(
+                format!(
+                    "Invalid nonce: expected {}, got {}",
+                    expected_nonce, tx_nonce
+                )
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Get expected nonce for an account
+    ///
+    /// Returns the next expected nonce for an account, taking into account
+    /// pending transactions in the transaction pool.
+    ///
+    /// # Arguments
+    /// * `address` - The account address
+    /// * `current_nonce` - The current nonce from state (0 for new accounts)
+    ///
+    /// # Returns
+    /// The next expected nonce (current_nonce + number_of_pending_txs + 1)
+    fn get_expected_nonce(&self, address: &Address, current_nonce: u64) -> u64 {
+        // Count pending transactions from this address in the pool
+        let mut pending_count = 0u64;
+        for entry in self.tx_pool.iter() {
+            if let Transaction::Transfer { from, .. } = entry.value() {
+                if from == address {
+                    pending_count += 1;
+                }
+            }
+        }
+
+        // Expected nonce is current nonce plus pending transactions
+        current_nonce + pending_count
+    }
+
     /// Get transaction data for signing (transaction without signature field)
     ///
     /// Creates a serialized representation of the transaction without the signature
     /// for use in signature verification. The data format matches what was signed.
     fn get_transaction_data_for_signing(&self, tx: &Transaction) -> Vec<u8> {
-        use bincode;
         
         // Serialize transaction data without signature
         // We manually serialize each field to match the signing format
@@ -568,13 +636,18 @@ mod tests {
     fn test_add_transaction_duplicate() {
         let config = create_test_config("duplicate");
         let state = crate::state::StateManager::new(&config).unwrap();
-        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
         
+        // Create account with balance for new account
         let keypair = KeyPair::generate();
         let from = keypair.address();
         let to = [2u8; 32];
         
-        // Create transaction
+        // Add account with balance (new account has nonce 0)
+        state.create_test_account(from, 10000, 0);
+        
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        // Create transaction with nonce 0 for new account
         let tx_data = {
             let mut data = Vec::new();
             data.extend_from_slice(b"Transfer");
@@ -582,7 +655,7 @@ mod tests {
             data.extend_from_slice(&to);
             data.extend_from_slice(&1000u64.to_le_bytes());
             data.extend_from_slice(&10u64.to_le_bytes());
-            data.extend_from_slice(&1u64.to_le_bytes());
+            data.extend_from_slice(&0u64.to_le_bytes()); // nonce 0 for new account
             data
         };
         let signature = keypair.sign(&tx_data);
@@ -592,7 +665,7 @@ mod tests {
             to,
             amount: 1000,
             fee: 10,
-            nonce: 1,
+            nonce: 0, // Correct nonce for new account
             signature,
         };
         
@@ -609,13 +682,18 @@ mod tests {
     fn test_verify_transaction_signature_transfer() {
         let config = create_test_config("signature");
         let state = crate::state::StateManager::new(&config).unwrap();
-        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
         
+        // Create account with balance for new account
         let keypair = KeyPair::generate();
         let from = keypair.address();
         let to = [2u8; 32];
         
-        // Create transaction data for signing
+        // Add account with balance (new account has nonce 0)
+        state.create_test_account(from, 10000, 0);
+        
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        // Create transaction data for signing with nonce 0 for new account
         let tx_data = {
             let mut data = Vec::new();
             data.extend_from_slice(b"Transfer");
@@ -623,7 +701,7 @@ mod tests {
             data.extend_from_slice(&to);
             data.extend_from_slice(&1000u64.to_le_bytes());
             data.extend_from_slice(&10u64.to_le_bytes());
-            data.extend_from_slice(&1u64.to_le_bytes());
+            data.extend_from_slice(&0u64.to_le_bytes()); // nonce 0 for new account
             data
         };
         let signature = keypair.sign(&tx_data);
@@ -633,7 +711,7 @@ mod tests {
             to,
             amount: 1000,
             fee: 10,
-            nonce: 1,
+            nonce: 0, // Correct nonce for new account
             signature,
         };
         
@@ -641,9 +719,8 @@ mod tests {
         // Note: This test verifies the signature format is correct
         // Full verification happens in add_transaction
         let result = consensus.add_transaction(tx);
-        // Should either succeed (if validation passes) or fail with specific error
-        // In this case, it might fail due to insufficient balance, but signature should be valid format
-        assert!(result.is_ok() || result.unwrap_err().to_string().contains("balance"));
+        // Should succeed with valid nonce and balance
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -661,5 +738,194 @@ mod tests {
         let result = consensus.add_transaction(tx);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_nonce_validation_new_account() {
+        let config = create_test_config("nonce_new");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let keypair = KeyPair::generate();
+        let from = keypair.address();
+        let to = [2u8; 32];
+        
+        // Create transaction with nonce 0 for new account
+        let tx_data = {
+            let mut data = Vec::new();
+            data.extend_from_slice(b"Transfer");
+            data.extend_from_slice(&from);
+            data.extend_from_slice(&to);
+            data.extend_from_slice(&1000u64.to_le_bytes());
+            data.extend_from_slice(&10u64.to_le_bytes());
+            data.extend_from_slice(&0u64.to_le_bytes()); // nonce 0
+            data
+        };
+        let signature = keypair.sign(&tx_data);
+        
+        let tx = Transaction::Transfer {
+            from,
+            to,
+            amount: 1000,
+            fee: 10,
+            nonce: 0, // Correct nonce for new account
+            signature,
+        };
+        
+        // Should succeed for new account with nonce 0
+        let result = consensus.add_transaction(tx);
+        // Might fail due to insufficient balance, but nonce should be valid
+        assert!(result.is_ok() || result.unwrap_err().to_string().contains("balance"));
+    }
+
+    #[test]
+    fn test_nonce_validation_duplicate() {
+        let config = create_test_config("nonce_dup");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        
+        // Create account with initial balance
+        let keypair = KeyPair::generate();
+        let from = keypair.address();
+        let to = [2u8; 32];
+        
+        // Manually create account with nonce 0 and balance
+        state.create_test_account(from, 10000, 0);
+        
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        // Create first transaction with nonce 0
+        let tx_data_1 = {
+            let mut data = Vec::new();
+            data.extend_from_slice(b"Transfer");
+            data.extend_from_slice(&from);
+            data.extend_from_slice(&to);
+            data.extend_from_slice(&1000u64.to_le_bytes());
+            data.extend_from_slice(&10u64.to_le_bytes());
+            data.extend_from_slice(&0u64.to_le_bytes());
+            data
+        };
+        let signature_1 = keypair.sign(&tx_data_1);
+        
+        let tx1 = Transaction::Transfer {
+            from,
+            to,
+            amount: 1000,
+            fee: 10,
+            nonce: 0,
+            signature: signature_1,
+        };
+        
+        // First transaction should succeed
+        consensus.add_transaction(tx1).unwrap();
+        
+        // Second transaction with same nonce should fail
+        let tx_data_2 = {
+            let mut data = Vec::new();
+            data.extend_from_slice(b"Transfer");
+            data.extend_from_slice(&from);
+            data.extend_from_slice(&to);
+            data.extend_from_slice(&500u64.to_le_bytes());
+            data.extend_from_slice(&10u64.to_le_bytes());
+            data.extend_from_slice(&0u64.to_le_bytes()); // Same nonce
+            data
+        };
+        let signature_2 = keypair.sign(&tx_data_2);
+        
+        let tx2 = Transaction::Transfer {
+            from,
+            to,
+            amount: 500,
+            fee: 10,
+            nonce: 0, // Duplicate nonce
+            signature: signature_2,
+        };
+        
+        let result = consensus.add_transaction(tx2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nonce"));
+    }
+
+    #[test]
+    fn test_nonce_validation_sequential() {
+        let config = create_test_config("nonce_seq");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        
+        // Create account with initial balance and nonce 1
+        let keypair = KeyPair::generate();
+        let from = keypair.address();
+        let to = [2u8; 32];
+        
+        // Account already executed 1 transaction (nonce 0), so current nonce is 1
+        state.create_test_account(from, 10000, 1);
+        
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        // Create transaction with nonce 1 (matches current account nonce)
+        // Expected nonce = current_nonce (1) + pending_count (0) = 1
+        let tx_data = {
+            let mut data = Vec::new();
+            data.extend_from_slice(b"Transfer");
+            data.extend_from_slice(&from);
+            data.extend_from_slice(&to);
+            data.extend_from_slice(&1000u64.to_le_bytes());
+            data.extend_from_slice(&10u64.to_le_bytes());
+            data.extend_from_slice(&1u64.to_le_bytes()); // nonce 1 matches current account nonce
+            data
+        };
+        let signature = keypair.sign(&tx_data);
+        
+        let tx = Transaction::Transfer {
+            from,
+            to,
+            amount: 1000,
+            fee: 10,
+            nonce: 1, // Correct: matches current account nonce
+            signature,
+        };
+        
+        let result = consensus.add_transaction(tx);
+        // Should succeed or fail due to balance, but nonce should be valid
+        assert!(result.is_ok() || result.unwrap_err().to_string().contains("balance"));
+    }
+
+    #[test]
+    fn test_nonce_validation_too_high() {
+        let config = create_test_config("nonce_high");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        
+        let keypair = KeyPair::generate();
+        let from = keypair.address();
+        let to = [2u8; 32];
+        
+        // Account has nonce 0 (new account, no transactions yet)
+        state.create_test_account(from, 10000, 0);
+        
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        // Transaction with nonce 5 when account has nonce 0 (should be 0)
+        let tx_data = {
+            let mut data = Vec::new();
+            data.extend_from_slice(b"Transfer");
+            data.extend_from_slice(&from);
+            data.extend_from_slice(&to);
+            data.extend_from_slice(&1000u64.to_le_bytes());
+            data.extend_from_slice(&10u64.to_le_bytes());
+            data.extend_from_slice(&5u64.to_le_bytes()); // nonce 5, too high
+            data
+        };
+        let signature = keypair.sign(&tx_data);
+        
+        let tx = Transaction::Transfer {
+            from,
+            to,
+            amount: 1000,
+            fee: 10,
+            nonce: 5, // Too high: account has nonce 0, expected is 0
+            signature,
+        };
+        
+        let result = consensus.add_transaction(tx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nonce"));
     }
 }

@@ -15,10 +15,10 @@ HAZE creates a "high-performance zone" for gaming assets and transactions, using
 ```
 ┌─────────────────────────────────────────┐
 │           Haze Interface Layer          │ ← "Surface of the fog"
-│   Unity/Unreal SDK | Web3.js | REST    │
+│   Unity/Unreal SDK | Web3.js | REST     │
 ├─────────────────────────────────────────┤
 │          Haze Execution Cloud           │ ← "Body of the fog"
-│    WASM VM + Game Primitives + State   │
+│    WASM VM + Game Primitives + State    │
 ├─────────────────────────────────────────┤
 │        Haze Consensus Core              │ ← "Core of the fog"
 │    DAG-Narwhal Modified "Fog Consensus" │

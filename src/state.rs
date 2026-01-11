@@ -148,7 +148,7 @@ impl StateManager {
     /// Apply transaction to state
     fn apply_transaction(&self, tx: &Transaction) -> Result<()> {
         match tx {
-            Transaction::Transfer { from, to, amount, fee, .. } => {
+            Transaction::Transfer { from, to, amount, fee, nonce, .. } => {
                 let mut from_account = self.accounts
                     .entry(*from)
                     .or_insert_with(|| AccountState {
@@ -157,12 +157,23 @@ impl StateManager {
                         staked: 0,
                     });
                 
+                // Verify nonce is sequential
+                let expected_nonce = from_account.nonce;
+                if *nonce != expected_nonce {
+                    return Err(HazeError::InvalidTransaction(
+                        format!(
+                            "Invalid nonce in transaction: expected {}, got {}",
+                            expected_nonce, nonce
+                        )
+                    ));
+                }
+                
                 if from_account.balance < *amount + *fee {
                     return Err(HazeError::InvalidTransaction("Insufficient balance".to_string()));
                 }
 
                 from_account.balance -= amount + fee;
-                from_account.nonce += 1;
+                from_account.nonce = *nonce + 1; // Update to next expected nonce
 
                 let mut to_account = self.accounts
                     .entry(*to)
@@ -221,6 +232,17 @@ impl StateManager {
     /// Get economy instance
     pub fn economy(&self) -> &Arc<FogEconomy> {
         &self.economy
+    }
+
+    #[cfg(test)]
+    /// Create test account (for testing only)
+    pub fn create_test_account(&self, address: Address, balance: u64, nonce: u64) {
+        let account = AccountState {
+            balance,
+            nonce,
+            staked: 0,
+        };
+        self.accounts.insert(address, account);
     }
 
     /// Compute state root hash
