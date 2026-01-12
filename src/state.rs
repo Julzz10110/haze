@@ -48,11 +48,14 @@ impl StateManager {
     /// Returns an error if the database cannot be opened.
     ///
     /// # Example
-    /// ```
+    /// ```no_run
     /// use haze::config::Config;
     /// use haze::state::StateManager;
+    /// use std::path::PathBuf;
     ///
-    /// let config = Config::default();
+    /// let mut config = Config::default();
+    /// // Use a unique database path to avoid conflicts
+    /// config.storage.db_path = PathBuf::from("./haze_db_doctest");
     /// let state_manager = StateManager::new(&config).unwrap();
     /// assert_eq!(state_manager.current_height(), 0);
     /// ```

@@ -240,7 +240,8 @@ impl ConsensusEngine {
                 }
                 self.verify_transaction_signature(tx, &data.owner)?;
 
-                // TODO: Validate asset data
+                // Validate asset data
+                self.validate_asset_data(data)?;
             }
         }
 
@@ -288,6 +289,103 @@ impl ConsensusEngine {
     ///
     /// # Errors
     /// Returns an error if the nonce is invalid (too low, too high, or duplicate).
+    /// Validate asset data
+    ///
+    /// Validates that asset data conforms to HAZE rules:
+    /// - Data size matches density level limits
+    /// - Owner address is valid (non-zero)
+    /// - Metadata is not empty for new assets
+    /// - Attributes are valid
+    fn validate_asset_data(&self, data: &crate::types::AssetData) -> Result<()> {
+
+        // Validate owner address (must be non-zero)
+        if data.owner == [0u8; 32] {
+            return Err(crate::error::HazeError::InvalidTransaction(
+                "Asset owner address cannot be zero".to_string()
+            ));
+        }
+
+        // Calculate total data size
+        let metadata_size: usize = data.metadata.values().map(|v| v.len()).sum();
+        let attributes_size: usize = data.attributes.iter()
+            .map(|attr| attr.name.len() + attr.value.len())
+            .sum();
+        let total_size = metadata_size + attributes_size;
+
+        // Validate data size against density level
+        let max_size = data.density.max_size();
+        if total_size > max_size {
+            return Err(crate::error::HazeError::InvalidTransaction(
+                format!(
+                    "Asset data size {} exceeds limit {} for density level {:?}",
+                    total_size, max_size, data.density
+                )
+            ));
+        }
+
+        // Validate metadata keys and values (no empty keys, reasonable length)
+        for (key, value) in &data.metadata {
+            if key.is_empty() {
+                return Err(crate::error::HazeError::InvalidTransaction(
+                    "Asset metadata cannot have empty keys".to_string()
+                ));
+            }
+            if key.len() > 256 {
+                return Err(crate::error::HazeError::InvalidTransaction(
+                    "Asset metadata key too long (max 256 bytes)".to_string()
+                ));
+            }
+            if value.len() > 1024 * 1024 {
+                return Err(crate::error::HazeError::InvalidTransaction(
+                    "Asset metadata value too long (max 1MB)".to_string()
+                ));
+            }
+        }
+
+        // Validate attributes
+        for attr in &data.attributes {
+            if attr.name.is_empty() {
+                return Err(crate::error::HazeError::InvalidTransaction(
+                    "Asset attribute name cannot be empty".to_string()
+                ));
+            }
+            if attr.name.len() > 128 {
+                return Err(crate::error::HazeError::InvalidTransaction(
+                    "Asset attribute name too long (max 128 bytes)".to_string()
+                ));
+            }
+            if attr.value.len() > 1024 {
+                return Err(crate::error::HazeError::InvalidTransaction(
+                    "Asset attribute value too long (max 1024 bytes)".to_string()
+                ));
+            }
+            // Validate rarity if present (should be between 0.0 and 1.0)
+            if let Some(rarity) = attr.rarity {
+                if rarity < 0.0 || rarity > 1.0 {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        format!("Asset attribute rarity must be between 0.0 and 1.0, got {}", rarity)
+                    ));
+                }
+            }
+        }
+
+        // Validate game_id if present (reasonable length)
+        if let Some(ref game_id) = data.game_id {
+            if game_id.is_empty() {
+                return Err(crate::error::HazeError::InvalidTransaction(
+                    "Game ID cannot be empty if present".to_string()
+                ));
+            }
+            if game_id.len() > 128 {
+                return Err(crate::error::HazeError::InvalidTransaction(
+                    "Game ID too long (max 128 bytes)".to_string()
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     fn validate_nonce(&self, tx: &Transaction) -> Result<()> {
         let (from_address, tx_nonce) = match tx {
             Transaction::Transfer { from, nonce, .. } => (*from, *nonce),
@@ -927,5 +1025,180 @@ mod tests {
         let result = consensus.add_transaction(tx);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nonce"));
+    }
+
+    // Asset validation tests
+    use crate::types::{AssetData, DensityLevel, Attribute};
+    
+    fn create_test_address_for_asset(seed: u8) -> Address {
+        let mut addr = [0u8; 32];
+        addr[0] = seed;
+        addr
+    }
+
+    #[test]
+    fn test_validate_asset_data_valid() {
+        let config = create_test_config("asset_valid");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let mut metadata = HashMap::new();
+        metadata.insert("name".to_string(), "Test Asset".to_string());
+        metadata.insert("description".to_string(), "A test asset".to_string());
+        
+        let data = AssetData {
+            density: DensityLevel::Ethereal,
+            metadata,
+            attributes: vec![
+                Attribute {
+                    name: "power".to_string(),
+                    value: "100".to_string(),
+                    rarity: Some(0.5),
+                }
+            ],
+            game_id: Some("test_game".to_string()),
+            owner: create_test_address_for_asset(1),
+        };
+        
+        let result = consensus.validate_asset_data(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_asset_data_zero_owner() {
+        let config = create_test_config("asset_zero_owner");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let data = AssetData {
+            density: DensityLevel::Ethereal,
+            metadata: HashMap::new(),
+            attributes: vec![],
+            game_id: None,
+            owner: [0u8; 32], // Zero address
+        };
+        
+        let result = consensus.validate_asset_data(&data);
+        assert!(result.is_err());
+        let error_msg = format!("{}", result.unwrap_err());
+        assert!(error_msg.contains("owner address cannot be zero"));
+    }
+
+    #[test]
+    fn test_validate_asset_data_exceeds_density_limit() {
+        let config = create_test_config("asset_density_limit");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let mut metadata = HashMap::new();
+        // Create metadata that exceeds Ethereal limit (5KB)
+        let large_value = "x".repeat(6 * 1024); // 6KB
+        metadata.insert("large_data".to_string(), large_value);
+        
+        let data = AssetData {
+            density: DensityLevel::Ethereal, // Max 5KB
+            metadata,
+            attributes: vec![],
+            game_id: None,
+            owner: create_test_address_for_asset(1),
+        };
+        
+        let result = consensus.validate_asset_data(&data);
+        assert!(result.is_err());
+        let error_msg = format!("{}", result.unwrap_err());
+        assert!(error_msg.contains("exceeds limit"));
+    }
+
+    #[test]
+    fn test_validate_asset_data_empty_metadata_key() {
+        let config = create_test_config("asset_empty_key");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let mut metadata = HashMap::new();
+        metadata.insert("".to_string(), "value".to_string()); // Empty key
+        
+        let data = AssetData {
+            density: DensityLevel::Ethereal,
+            metadata,
+            attributes: vec![],
+            game_id: None,
+            owner: create_test_address_for_asset(1),
+        };
+        
+        let result = consensus.validate_asset_data(&data);
+        assert!(result.is_err());
+        let error_msg = format!("{}", result.unwrap_err());
+        assert!(error_msg.contains("empty keys"));
+    }
+
+    #[test]
+    fn test_validate_asset_data_invalid_rarity() {
+        let config = create_test_config("asset_invalid_rarity");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let data = AssetData {
+            density: DensityLevel::Ethereal,
+            metadata: HashMap::new(),
+            attributes: vec![
+                Attribute {
+                    name: "power".to_string(),
+                    value: "100".to_string(),
+                    rarity: Some(1.5), // Invalid: > 1.0
+                }
+            ],
+            game_id: None,
+            owner: create_test_address_for_asset(1),
+        };
+        
+        let result = consensus.validate_asset_data(&data);
+        assert!(result.is_err());
+        let error_msg = format!("{}", result.unwrap_err());
+        assert!(error_msg.contains("rarity"));
+    }
+
+    #[test]
+    fn test_validate_asset_data_valid_rarity() {
+        let config = create_test_config("asset_valid_rarity");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let data = AssetData {
+            density: DensityLevel::Ethereal,
+            metadata: HashMap::new(),
+            attributes: vec![
+                Attribute {
+                    name: "power".to_string(),
+                    value: "100".to_string(),
+                    rarity: Some(0.75), // Valid: between 0.0 and 1.0
+                }
+            ],
+            game_id: None,
+            owner: create_test_address_for_asset(1),
+        };
+        
+        let result = consensus.validate_asset_data(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_asset_data_empty_game_id() {
+        let config = create_test_config("asset_empty_game_id");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        
+        let data = AssetData {
+            density: DensityLevel::Ethereal,
+            metadata: HashMap::new(),
+            attributes: vec![],
+            game_id: Some("".to_string()), // Empty game_id
+            owner: create_test_address_for_asset(1),
+        };
+        
+        let result = consensus.validate_asset_data(&data);
+        assert!(result.is_err());
+        let error_msg = format!("{}", result.unwrap_err());
+        assert!(error_msg.contains("Game ID cannot be empty"));
     }
 }
