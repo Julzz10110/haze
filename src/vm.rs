@@ -203,47 +203,73 @@ impl HazeVM {
     }
 
     fn create_asset_mist_contract(&self) -> Result<Vec<u8>> {
-        // Generate minimal WASM module for Asset Mist
         // Asset Mist: Dynamic NFT with variable data density
         // Functions: create, condense, evaporate, merge, split
-        self.create_minimal_wasm_module("asset_mist")
+        self.create_wasm_module_with_functions(
+            "asset_mist",
+            &[
+                ("create", 1),      // (density: i64) -> i64
+                ("condense", 1),    // (amount: i64) -> i64
+                ("evaporate", 1),   // (amount: i64) -> i64
+                ("merge", 2),       // (asset1: i64, asset2: i64) -> i64
+                ("split", 2),       // (asset: i64, parts: i64) -> i64
+            ],
+        )
     }
 
     fn create_economy_fog_contract(&self) -> Result<Vec<u8>> {
-        // Generate minimal WASM module for Economy Fog
         // Economy Fog: Built-in economic systems
         // Functions: create_pool, swap, add_liquidity, remove_liquidity
-        self.create_minimal_wasm_module("economy_fog")
+        self.create_wasm_module_with_functions(
+            "economy_fog",
+            &[
+                ("create_pool", 2),      // (asset1: i64, asset2: i64) -> i64
+                ("swap", 3),             // (pool: i64, amount_in: i64, asset_in: i64) -> i64
+                ("add_liquidity", 3),    // (pool: i64, amount1: i64, amount2: i64) -> i64
+                ("remove_liquidity", 2), // (pool: i64, shares: i64) -> i64
+            ],
+        )
     }
 
     fn create_quest_haze_contract(&self) -> Result<Vec<u8>> {
-        // Generate minimal WASM module for Quest Haze
         // Quest Haze: Verifiable quests with progressive reveal
         // Functions: create_quest, complete_quest, verify_quest
-        self.create_minimal_wasm_module("quest_haze")
+        self.create_wasm_module_with_functions(
+            "quest_haze",
+            &[
+                ("create_quest", 2),   // (quest_id: i64, requirements: i64) -> i64
+                ("complete_quest", 1), // (quest_id: i64) -> i64
+                ("verify_quest", 1),   // (quest_id: i64) -> i64
+            ],
+        )
     }
 
     fn create_battle_smoke_contract(&self) -> Result<Vec<u8>> {
-        // Generate minimal WASM module for Battle Smoke
         // Battle Smoke: PvP system with instant conflict resolution
         // Functions: initiate_battle, resolve_battle, claim_rewards
-        self.create_minimal_wasm_module("battle_smoke")
+        self.create_wasm_module_with_functions(
+            "battle_smoke",
+            &[
+                ("initiate_battle", 2), // (player1: i64, player2: i64) -> i64
+                ("resolve_battle", 1),  // (battle_id: i64) -> i64
+                ("claim_rewards", 1),   // (battle_id: i64) -> i64
+            ],
+        )
     }
 
-    /// Create minimal valid WASM module
+    /// Create WASM module with multiple exported functions
     /// 
-    /// This generates a minimal WASM module that can be instantiated and executed.
-    /// In a full implementation, this would generate proper WASM bytecode with
-    /// actual function implementations for each game primitive.
-    fn create_minimal_wasm_module(&self, _primitive_name: &str) -> Result<Vec<u8>> {
-        // Minimal valid WASM module structure:
-        // 1. Magic number: 0x00 0x61 0x73 0x6D (".asm")
-        // 2. Version: 0x01 0x00 0x00 0x00
-        // 3. Type section (function signatures)
-        // 4. Function section (function indices)
-        // 5. Export section (exported functions)
-        // 6. Code section (function bodies)
-        
+    /// Generates a WASM module with the specified functions, each taking
+    /// the given number of i64 parameters and returning i64.
+    fn create_wasm_module_with_functions(
+        &self,
+        _primitive_name: &str,
+        functions: &[(&str, u32)],
+    ) -> Result<Vec<u8>> {
+        if functions.is_empty() {
+            return Err(HazeError::VM("At least one function is required".to_string()));
+        }
+
         let mut wasm = Vec::new();
         
         // Magic number
@@ -251,47 +277,99 @@ impl HazeVM {
         
         // Version
         wasm.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
+
+        // Type section: define function types for each function
+        // Each function: (i64, ...) -> i64
+        let mut type_section = Vec::new();
+        type_section.push(functions.len() as u8); // Number of types
         
-        // Type section (section 1)
-        // One function type: () -> i64
+        for (_, param_count) in functions {
+            type_section.push(0x60); // Function type
+            // Encode parameter count using LEB128
+            type_section.push(*param_count as u8); // Number of parameters
+            // Add i64 type for each parameter
+            for _ in 0..*param_count {
+                type_section.push(0x7E); // i64
+            }
+            type_section.push(0x01); // 1 result
+            type_section.push(0x7E); // i64
+        }
+        
         wasm.push(0x01); // Type section
-        wasm.push(0x07); // Section size
-        wasm.push(0x01); // Number of types
-        wasm.push(0x60); // Function type
-        wasm.push(0x00); // 0 parameters
-        wasm.push(0x01); // 1 result
-        wasm.push(0x7E); // i64
+        wasm.push(type_section.len() as u8); // Section size
+        wasm.extend_from_slice(&type_section);
+
+        // Function section: map functions to types
+        let mut func_section = Vec::new();
+        func_section.push(functions.len() as u8); // Number of functions
+        for (idx, _) in functions.iter().enumerate() {
+            func_section.push(idx as u8); // Type index
+        }
         
-        // Function section (section 3)
-        // One function with type index 0
         wasm.push(0x03); // Function section
-        wasm.push(0x02); // Section size
-        wasm.push(0x01); // Number of functions
-        wasm.push(0x00); // Type index 0
+        wasm.push(func_section.len() as u8); // Section size
+        wasm.extend_from_slice(&func_section);
+
+        // Export section: export all functions
+        let mut export_section = Vec::new();
+        export_section.push(functions.len() as u8); // Number of exports
         
-        // Export section (section 7)
-        // Export function "execute" at index 0
+        for (name, _) in functions {
+            export_section.push(name.len() as u8); // Name length
+            export_section.extend_from_slice(name.as_bytes()); // Export name
+            export_section.push(0x00); // Export kind (function)
+            // Function index (same as type index for simplicity)
+            let func_idx = functions.iter().position(|(n, _)| n == name).unwrap() as u8;
+            export_section.push(func_idx);
+        }
+        
         wasm.push(0x07); // Export section
-        wasm.push(0x0A); // Section size
-        wasm.push(0x01); // Number of exports
-        wasm.push(0x07); // Name length
-        wasm.extend_from_slice(b"execute"); // Export name
-        wasm.push(0x00); // Export kind (function)
-        wasm.push(0x00); // Function index 0
+        wasm.push(export_section.len() as u8); // Section size
+        wasm.extend_from_slice(&export_section);
+
+        // Code section: function bodies
+        // Each function returns a simple computation based on its parameters
+        let mut code_section = Vec::new();
+        code_section.push(functions.len() as u8); // Number of functions
         
-        // Code section (section 10)
-        // Function body: return constant 0
+        for (_, param_count) in functions {
+            // Function body: sum all parameters and return
+            let mut body = Vec::new();
+            body.push(0x00); // Local count
+            
+            if *param_count == 0 {
+                // No parameters: return 0
+                body.push(0x42); // i64.const
+                body.push(0x00); // 0
+            } else if *param_count == 1 {
+                // One parameter: return it (get_local 0)
+                body.push(0x20); // local.get
+                body.push(0x00); // local index 0
+            } else {
+                // Multiple parameters: sum them
+                body.push(0x20); // local.get
+                body.push(0x00); // local index 0
+                for i in 1..*param_count {
+                    body.push(0x20); // local.get
+                    body.push(i as u8); // local index
+                    body.push(0x7C); // i64.add
+                }
+            }
+            
+            body.push(0x0B); // end
+            
+            // Encode body size
+            code_section.push(body.len() as u8); // Function body size
+            code_section.extend_from_slice(&body);
+        }
+        
         wasm.push(0x0A); // Code section
-        wasm.push(0x09); // Section size
-        wasm.push(0x01); // Number of functions
-        wasm.push(0x07); // Function body size
-        wasm.push(0x00); // Local count
-        wasm.push(0x42); // i64.const
-        wasm.push(0x00); // 0
-        wasm.push(0x0B); // end
-        
+        wasm.push(code_section.len() as u8); // Section size
+        wasm.extend_from_slice(&code_section);
+
         Ok(wasm)
     }
+
 }
 
 /// Game primitive types
@@ -450,5 +528,81 @@ mod tests {
         let result = vm.execute_contract(&wasm, "execute", &[], context);
         // Should fail due to insufficient gas
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_asset_mist_has_functions() {
+        let config = create_test_config();
+        let vm = HazeVM::new(config).unwrap();
+        let wasm = vm.create_game_primitive(GamePrimitiveType::AssetMist).unwrap();
+        
+        // Test that module compiles and functions are exported
+        // We'll verify by checking that the module can be instantiated
+        let module = wasmtime::Module::new(&vm.engine, &wasm);
+        assert!(module.is_ok(), "WASM module should compile");
+        
+        let module = module.unwrap();
+        let mut store = wasmtime::Store::new(&vm.engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]);
+        assert!(instance.is_ok(), "WASM module should instantiate");
+        
+        let instance = instance.unwrap();
+        // Check that functions are exported
+        let functions = ["create", "condense", "evaporate", "merge", "split"];
+        for func_name in &functions {
+            let func = instance.get_func(&mut store, func_name);
+            assert!(func.is_some(), "Function '{}' should be exported", func_name);
+        }
+    }
+
+    #[test]
+    fn test_economy_fog_has_functions() {
+        let config = create_test_config();
+        let vm = HazeVM::new(config).unwrap();
+        let wasm = vm.create_game_primitive(GamePrimitiveType::EconomyFog).unwrap();
+        
+        let module = wasmtime::Module::new(&vm.engine, &wasm).unwrap();
+        let mut store = wasmtime::Store::new(&vm.engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        
+        let functions = ["create_pool", "swap", "add_liquidity", "remove_liquidity"];
+        for func_name in &functions {
+            assert!(instance.get_func(&mut store, func_name).is_some(),
+                "Function '{}' should be exported", func_name);
+        }
+    }
+
+    #[test]
+    fn test_quest_haze_has_functions() {
+        let config = create_test_config();
+        let vm = HazeVM::new(config).unwrap();
+        let wasm = vm.create_game_primitive(GamePrimitiveType::QuestHaze).unwrap();
+        
+        let module = wasmtime::Module::new(&vm.engine, &wasm).unwrap();
+        let mut store = wasmtime::Store::new(&vm.engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        
+        let functions = ["create_quest", "complete_quest", "verify_quest"];
+        for func_name in &functions {
+            assert!(instance.get_func(&mut store, func_name).is_some(),
+                "Function '{}' should be exported", func_name);
+        }
+    }
+
+    #[test]
+    fn test_battle_smoke_has_functions() {
+        let config = create_test_config();
+        let vm = HazeVM::new(config).unwrap();
+        let wasm = vm.create_game_primitive(GamePrimitiveType::BattleSmoke).unwrap();
+        
+        let module = wasmtime::Module::new(&vm.engine, &wasm).unwrap();
+        let mut store = wasmtime::Store::new(&vm.engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        
+        let functions = ["initiate_battle", "resolve_battle", "claim_rewards"];
+        for func_name in &functions {
+            assert!(instance.get_func(&mut store, func_name).is_some(),
+                "Function '{}' should be exported", func_name);
+        }
     }
 }
