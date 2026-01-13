@@ -13,6 +13,14 @@ use libp2p::{
     swarm::{Swarm, SwarmEvent, NetworkBehaviour},
     PeerId, Multiaddr,
 };
+// Note: request-response protocols will be fully implemented when transport is fixed
+// For now, we define the structure and codec, but actual network integration
+// requires libp2p-tcp with tokio feature to be properly configured
+// TODO: Uncomment when transport is fixed:
+// use libp2p::request_response::{
+//     RequestResponse, RequestResponseConfig, 
+//     ProtocolSupport, RequestResponseCodec,
+// };
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::error::{HazeError, Result as HazeResult};
@@ -27,13 +35,29 @@ pub enum NetworkEvent {
     PeerDisconnected(String),
 }
 
+/// Protocol name for blocks
+const BLOCKS_PROTOCOL_NAME: &[u8] = b"/haze/blocks/1.0.0";
+/// Protocol name for transactions
+const TRANSACTIONS_PROTOCOL_NAME: &[u8] = b"/haze/transactions/1.0.0";
+
+/// Codec for blocks and transactions using bincode
+/// 
+/// This codec will be used for request-response protocols when transport is fixed.
+/// It serializes/deserializes blocks and transactions using bincode.
+#[derive(Clone)]
+pub struct HazeCodec;
+
+// TODO: Implement RequestResponseCodec when transport is fixed
+// The codec will handle serialization/deserialization of blocks and transactions
+// using bincode format with length-prefixed encoding
+
 /// Haze network behaviour combining multiple protocols
 #[derive(NetworkBehaviour)]
 pub struct HazeBehaviour {
     pub ping: libp2p::ping::Behaviour,
-    // Future: Add request-response for blocks/transactions
-    // pub blocks: request_response::Behaviour<...>,
-    // pub transactions: request_response::Behaviour<...>,
+    // TODO: Add request-response protocols when transport is fixed
+    // pub blocks: RequestResponse<HazeCodec>,
+    // pub transactions: RequestResponse<HazeCodec>,
 }
 
 impl HazeBehaviour {
@@ -42,6 +66,9 @@ impl HazeBehaviour {
             ping: libp2p::ping::Behaviour::new(
                 libp2p::ping::Config::new(),
             ),
+            // TODO: Initialize request-response protocols when transport is fixed
+            // blocks: RequestResponse::new(...),
+            // transactions: RequestResponse::new(...),
         }
     }
 }
@@ -165,9 +192,12 @@ impl Network {
             self.connected_peers.len()
         );
         
-        // Future: Use request-response to actually send to peers
-        // for peer_id in &self.connected_peers {
-        //     self.swarm.behaviour_mut().blocks.send_request(peer_id, block_data.clone());
+        // TODO: Use request-response protocol to actually send to peers when transport is fixed
+        // Example:
+        // if let Some(swarm) = &mut self.swarm {
+        //     for peer_id in &self.connected_peers {
+        //         swarm.behaviour_mut().blocks.send_request(peer_id, block_data.clone());
+        //     }
         // }
         
         Ok(())
@@ -188,7 +218,13 @@ impl Network {
             self.connected_peers.len()
         );
         
-        // Future: Use request-response to actually send to peers
+        // TODO: Use request-response protocol to actually send to peers when transport is fixed
+        // Example:
+        // if let Some(swarm) = &mut self.swarm {
+        //     for peer_id in &self.connected_peers {
+        //         swarm.behaviour_mut().transactions.send_request(peer_id, tx_data.clone());
+        //     }
+        // }
         
         Ok(())
     }

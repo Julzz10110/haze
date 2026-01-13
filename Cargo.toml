@@ -20,7 +20,7 @@ blake3 = "1.5"
 rand = "0.8"
 
 # Networking
-libp2p = { version = "0.53", features = ["tcp", "websocket", "noise", "yamux", "macros", "ping"] }
+libp2p = { version = "0.53", features = ["tcp", "websocket", "noise", "yamux", "macros", "ping", "request-response"] }
 multiaddr = "0.18"
 
 # WASM runtime
@@ -48,3 +48,5 @@ parking_lot = "0.12"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 hex = "0.4"
 bytes = "1.5"
+futures = "0.3"
+libp2p-request-response = "0.12"
