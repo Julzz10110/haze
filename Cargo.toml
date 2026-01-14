@@ -7,6 +7,7 @@ edition = "2024"
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 async-trait = "0.1"
+futures = "0.3"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -20,7 +21,8 @@ blake3 = "1.5"
 rand = "0.8"
 
 # Networking
-libp2p = { version = "0.53", features = ["tcp", "websocket", "noise", "yamux", "macros", "ping", "request-response"] }
+libp2p = { version = "0.53", features = ["tcp", "tokio", "noise", "yamux", "macros", "ping", "request-response"] }
+libp2p-request-response = "0.26"
 multiaddr = "0.18"
 
 # WASM runtime
@@ -48,5 +50,3 @@ parking_lot = "0.12"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 hex = "0.4"
 bytes = "1.5"
-futures = "0.3"
-libp2p-request-response = "0.12"
