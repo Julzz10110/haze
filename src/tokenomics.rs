@@ -131,10 +131,14 @@ impl Tokenomics {
 
         // Calculate annual inflation amount
         let inflation_rate = *self.current_inflation_rate.read();
-        let annual_inflation = self.circulating_supply() * inflation_rate / 10_000;
+        // Use checked arithmetic to avoid overflow
+        let annual_inflation = self.circulating_supply()
+            .checked_mul(inflation_rate)
+            .and_then(|v| v.checked_div(10_000))
+            .unwrap_or(0);
         
         // Per-block inflation
-        let block_inflation = annual_inflation / BLOCKS_PER_YEAR;
+        let block_inflation = annual_inflation.checked_div(BLOCKS_PER_YEAR).unwrap_or(0);
         
         // Update total supply
         *self.total_supply.write() += block_inflation;
