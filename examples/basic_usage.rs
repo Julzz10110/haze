@@ -49,7 +49,7 @@ fn main() {
     let mut new_data = HashMap::new();
     new_data.insert("texture".to_string(), "sword_texture.png".to_string());
     new_data.insert("model".to_string(), "sword_model.gltf".to_string());
-    asset.condense(new_data).unwrap();
+    asset.condense(new_data, None).unwrap(); // None = no blob storage needed for Light density
     println!("NFT condensed: Light (50KB)");
     println!();
 

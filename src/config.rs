@@ -77,6 +77,15 @@ pub struct StorageConfig {
     
     /// State cache size (MB)
     pub state_cache_size: usize,
+    
+    /// Blob storage path for large files
+    pub blob_storage_path: PathBuf,
+    
+    /// Maximum blob size (bytes) - for Core density assets
+    pub max_blob_size: usize,
+    
+    /// Chunk size for streaming large files (bytes)
+    pub blob_chunk_size: usize,
 }
 
 impl Config {
@@ -125,6 +134,9 @@ impl Config {
             storage: StorageConfig {
                 db_path: PathBuf::from("./haze_db"),
                 state_cache_size: 256,
+                blob_storage_path: PathBuf::from("./haze_db/blobs"),
+                max_blob_size: 100 * 1024 * 1024, // 100MB for Core density
+                blob_chunk_size: 1024 * 1024, // 1MB chunks
             },
             log_level: "info".to_string(),
         }
