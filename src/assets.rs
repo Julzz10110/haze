@@ -624,7 +624,7 @@ mod tests {
         );
         
         let file_data = b"Large file content for Core density asset";
-        let blob_hash = asset.store_blob_file(
+        let _blob_hash = asset.store_blob_file(
             "model_3d".to_string(),
             file_data,
             &blob_storage,

@@ -116,6 +116,17 @@ impl StateManager {
     pub fn get_block(&self, hash: &Hash) -> Option<Block> {
         self.blocks.get(hash).map(|v| v.clone())
     }
+    
+    /// Get block by height
+    /// Note: This is O(n) operation. In production, use an index for O(1) lookup.
+    pub fn get_block_by_height(&self, height: u64) -> Option<Block> {
+        for entry in self.blocks.iter() {
+            if entry.value().header.height == height {
+                return Some(entry.value().clone());
+            }
+        }
+        None
+    }
 
     /// Get current height
     pub fn current_height(&self) -> u64 {

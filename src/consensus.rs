@@ -170,6 +170,16 @@ impl ConsensusEngine {
         self.tx_pool.insert(tx_hash, tx);
         Ok(())
     }
+    
+    /// Get transaction from pool by hash
+    pub fn get_transaction(&self, tx_hash: &Hash) -> Option<Transaction> {
+        self.tx_pool.get(tx_hash).map(|tx| tx.clone())
+    }
+    
+    /// Get current wave number (read access)
+    pub fn get_current_wave(&self) -> u64 {
+        *self.current_wave.read()
+    }
 
     /// Validate transaction
     ///

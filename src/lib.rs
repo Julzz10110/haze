@@ -14,6 +14,7 @@ pub mod config;
 pub mod error;
 pub mod tokenomics;
 pub mod economy;
+pub mod api;
 
 // Re-export commonly used types
 pub use types::{Block, Transaction, Address, Hash, AssetAction, AssetData, DensityLevel, sha256, hash_to_hex, hex_to_hash};

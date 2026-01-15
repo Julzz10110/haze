@@ -239,6 +239,16 @@ impl FogEconomy {
 
         Ok(pool_id)
     }
+    
+    /// Get liquidity pool by ID
+    pub fn get_liquidity_pool(&self, pool_id: &str) -> Option<LiquidityPool> {
+        self.liquidity_pools.get(pool_id).map(|p| p.clone())
+    }
+    
+    /// Get all liquidity pools (for API access)
+    pub fn liquidity_pools(&self) -> &Arc<DashMap<String, LiquidityPool>> {
+        &self.liquidity_pools
+    }
 
     /// Swap assets in liquidity pool (constant product formula)
     pub fn swap_assets(

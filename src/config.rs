@@ -5,6 +5,18 @@ use std::path::PathBuf;
 use crate::error::{HazeError, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiConfig {
+    /// API server listen address
+    pub listen_addr: String,
+    
+    /// Enable CORS
+    pub enable_cors: bool,
+    
+    /// Enable WebSocket support
+    pub enable_websocket: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Node identity
     pub node_id: String,
@@ -20,6 +32,9 @@ pub struct Config {
     
     /// Storage configuration
     pub storage: StorageConfig,
+    
+    /// API configuration
+    pub api: ApiConfig,
     
     /// Logging level
     pub log_level: String,
@@ -137,6 +152,11 @@ impl Config {
                 blob_storage_path: PathBuf::from("./haze_db/blobs"),
                 max_blob_size: 100 * 1024 * 1024, // 100MB for Core density
                 blob_chunk_size: 1024 * 1024, // 1MB chunks
+            },
+            api: ApiConfig {
+                listen_addr: "127.0.0.1:8080".to_string(),
+                enable_cors: true,
+                enable_websocket: true,
             },
             log_level: "info".to_string(),
         }

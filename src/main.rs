@@ -14,6 +14,7 @@ mod config;
 mod error;
 mod tokenomics;
 mod economy;
+mod api;
 
 use anyhow::Result;
 use tracing::{info, error};
@@ -23,6 +24,7 @@ use crate::config::Config;
 use crate::network::Network;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
+use crate::api::{ApiState, start_api_server};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,7 +33,7 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    info!("🌫️  HAZE Blockchain starting...");
+    info!("HAZE Blockchain starting...");
     info!("Where games breathe blockchain");
 
     // Load configuration
@@ -52,8 +54,16 @@ async fn main() -> Result<()> {
     let mut network = Network::new(config.clone(), consensus.clone()).await?;
     info!("Network layer initialized");
 
+    // Initialize API server
+    let api_state = ApiState {
+        consensus: consensus.clone(),
+        state: state_manager.clone(),
+        config: config.clone(),
+    };
+    info!("API server state initialized");
+
     // Start the node
-    info!("🚀 HAZE node is running...");
+    info!("HAZE node is running...");
     info!("Press Ctrl+C to shutdown");
     
     // Start network in background
@@ -63,11 +73,19 @@ async fn main() -> Result<()> {
         }
     });
     
+    // Start API server in background
+    let api_handle = tokio::spawn(async move {
+        if let Err(e) = start_api_server(api_state).await {
+            error!("API server error: {}", e);
+        }
+    });
+    
     // Keep the node running
     tokio::signal::ctrl_c().await?;
     info!("Shutting down HAZE node...");
     
     network_handle.abort();
+    api_handle.abort();
 
     Ok(())
 }
