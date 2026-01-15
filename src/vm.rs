@@ -9,6 +9,38 @@ use crate::error::{HazeError, Result};
 use crate::config::Config;
 use crate::types::Address;
 
+/// Encode unsigned 32-bit integer as LEB128
+fn encode_leb128_u32(buf: &mut Vec<u8>, mut value: u32) {
+    loop {
+        let mut byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+/// Encode signed 64-bit integer as LEB128
+fn encode_leb128_i64(buf: &mut Vec<u8>, mut value: i64) {
+    loop {
+        let mut byte = (value & 0x7F) as u8;
+        value >>= 7;
+        let more = !(((value == 0) && ((byte & 0x40) == 0)) || 
+                     ((value == -1) && ((byte & 0x40) != 0)));
+        if more {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if !more {
+            break;
+        }
+    }
+}
+
 /// HazeVM instance
 pub struct HazeVM {
     engine: Engine,
@@ -181,7 +213,6 @@ impl HazeVM {
         &self,
         primitive_type: GamePrimitiveType,
     ) -> Result<Vec<u8>> {
-        // TODO: Generate WASM code for game primitives
         match primitive_type {
             GamePrimitiveType::AssetMist => {
                 // Asset Mist: Dynamic NFT with variable data density
@@ -261,6 +292,7 @@ impl HazeVM {
     /// 
     /// Generates a WASM module with the specified functions, each taking
     /// the given number of i64 parameters and returning i64.
+    /// Includes memory section for data operations.
     fn create_wasm_module_with_functions(
         &self,
         _primitive_name: &str,
@@ -281,93 +313,288 @@ impl HazeVM {
         // Type section: define function types for each function
         // Each function: (i64, ...) -> i64
         let mut type_section = Vec::new();
-        type_section.push(functions.len() as u8); // Number of types
+        encode_leb128_u32(&mut type_section, functions.len() as u32);
         
         for (_, param_count) in functions {
             type_section.push(0x60); // Function type
             // Encode parameter count using LEB128
-            type_section.push(*param_count as u8); // Number of parameters
+            encode_leb128_u32(&mut type_section, *param_count);
             // Add i64 type for each parameter
             for _ in 0..*param_count {
                 type_section.push(0x7E); // i64
             }
-            type_section.push(0x01); // 1 result
+            encode_leb128_u32(&mut type_section, 1); // 1 result
             type_section.push(0x7E); // i64
         }
         
         wasm.push(0x01); // Type section
-        wasm.push(type_section.len() as u8); // Section size
+        encode_leb128_u32(&mut wasm, type_section.len() as u32);
         wasm.extend_from_slice(&type_section);
 
-        // Function section: map functions to types
+        // Function section: map functions to types (must come before Memory section)
         let mut func_section = Vec::new();
-        func_section.push(functions.len() as u8); // Number of functions
+        encode_leb128_u32(&mut func_section, functions.len() as u32);
         for (idx, _) in functions.iter().enumerate() {
-            func_section.push(idx as u8); // Type index
+            encode_leb128_u32(&mut func_section, idx as u32);
         }
         
         wasm.push(0x03); // Function section
-        wasm.push(func_section.len() as u8); // Section size
+        encode_leb128_u32(&mut wasm, func_section.len() as u32);
         wasm.extend_from_slice(&func_section);
 
-        // Export section: export all functions
+        // Memory section: add linear memory for data operations
+        // Memory with initial size of 1 page (64KB) and max 256 pages (16MB)
+        let mut memory_section = Vec::new();
+        encode_leb128_u32(&mut memory_section, 1); // Number of memory types (1)
+        memory_section.push(0x00); // No maximum (0x01 would indicate max)
+        encode_leb128_u32(&mut memory_section, 1); // Initial pages (1 page = 64KB)
+        wasm.push(0x05); // Memory section
+        encode_leb128_u32(&mut wasm, memory_section.len() as u32);
+        wasm.extend_from_slice(&memory_section);
+
+        // Export section: export all functions and memory
         let mut export_section = Vec::new();
-        export_section.push(functions.len() as u8); // Number of exports
+        encode_leb128_u32(&mut export_section, (functions.len() + 1) as u32); // +1 for memory
         
+        // Export memory
+        encode_leb128_u32(&mut export_section, 6); // "memory" length
+        export_section.extend_from_slice(b"memory");
+        export_section.push(0x02); // Export kind (memory)
+        encode_leb128_u32(&mut export_section, 0); // Memory index
+        
+        // Export functions
         for (name, _) in functions {
-            export_section.push(name.len() as u8); // Name length
-            export_section.extend_from_slice(name.as_bytes()); // Export name
+            encode_leb128_u32(&mut export_section, name.len() as u32);
+            export_section.extend_from_slice(name.as_bytes());
             export_section.push(0x00); // Export kind (function)
             // Function index (same as type index for simplicity)
-            let func_idx = functions.iter().position(|(n, _)| n == name).unwrap() as u8;
-            export_section.push(func_idx);
+            let func_idx = functions.iter().position(|(n, _)| n == name).unwrap() as u32;
+            encode_leb128_u32(&mut export_section, func_idx);
         }
         
         wasm.push(0x07); // Export section
-        wasm.push(export_section.len() as u8); // Section size
+        encode_leb128_u32(&mut wasm, export_section.len() as u32);
         wasm.extend_from_slice(&export_section);
 
-        // Code section: function bodies
-        // Each function returns a simple computation based on its parameters
+        // Code section: function bodies with improved logic
         let mut code_section = Vec::new();
-        code_section.push(functions.len() as u8); // Number of functions
+        encode_leb128_u32(&mut code_section, functions.len() as u32);
         
-        for (_, param_count) in functions {
-            // Function body: sum all parameters and return
-            let mut body = Vec::new();
-            body.push(0x00); // Local count
-            
-            if *param_count == 0 {
-                // No parameters: return 0
-                body.push(0x42); // i64.const
-                body.push(0x00); // 0
-            } else if *param_count == 1 {
-                // One parameter: return it (get_local 0)
-                body.push(0x20); // local.get
-                body.push(0x00); // local index 0
-            } else {
-                // Multiple parameters: sum them
-                body.push(0x20); // local.get
-                body.push(0x00); // local index 0
-                for i in 1..*param_count {
-                    body.push(0x20); // local.get
-                    body.push(i as u8); // local index
-                    body.push(0x7C); // i64.add
-                }
-            }
-            
-            body.push(0x0B); // end
-            
-            // Encode body size
-            code_section.push(body.len() as u8); // Function body size
+        for (func_name, param_count) in functions {
+            let body = self.generate_function_body(func_name, *param_count)?;
+            encode_leb128_u32(&mut code_section, body.len() as u32);
             code_section.extend_from_slice(&body);
         }
         
         wasm.push(0x0A); // Code section
-        wasm.push(code_section.len() as u8); // Section size
+        encode_leb128_u32(&mut wasm, code_section.len() as u32);
         wasm.extend_from_slice(&code_section);
 
         Ok(wasm)
+    }
+
+    /// Generate function body with primitive-specific logic
+    fn generate_function_body(&self, func_name: &str, param_count: u32) -> Result<Vec<u8>> {
+        let mut body = Vec::new();
+        encode_leb128_u32(&mut body, 0); // Local count (no locals for now)
+        
+        // Generate logic based on function name and parameters
+        match func_name {
+            // Asset Mist functions
+            "create" => {
+                // create(density: i64) -> i64
+                // Returns asset_id (hash of density + timestamp simulation)
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0); // parameter 0 (density)
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 1000); // Simulated timestamp
+                body.push(0x7C); // i64.add
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 0x5A5A5A5A5A5A5A5A); // Magic constant for hashing simulation
+                body.push(0x7C); // i64.add
+            }
+            "condense" => {
+                // condense(amount: i64) -> i64
+                // Returns new density level (increases by amount)
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 1); // Minimum density increase
+                body.push(0x7C); // i64.add
+            }
+            "evaporate" => {
+                // evaporate(amount: i64) -> i64
+                // Returns new density level (decreases by amount, but not below 0)
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 0);
+                body.push(0x51); // i64.gt_s (greater than)
+                body.push(0x04); // if (result type: i64)
+                body.push(0x7E); // i64
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 1);
+                body.push(0x7D); // i64.sub
+                body.push(0x05); // else
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 0);
+                body.push(0x0B); // end
+            }
+            "merge" => {
+                // merge(asset1: i64, asset2: i64) -> i64
+                // Returns combined asset_id (hash of both assets)
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 1);
+                body.push(0x7C); // i64.add
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 0x3C3C3C3C3C3C3C3C); // Merge constant
+                body.push(0x7C); // i64.add
+            }
+            "split" => {
+                // split(asset: i64, parts: i64) -> i64
+                // Returns first split asset_id
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 1);
+                body.push(0x7C); // i64.add
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 0x2D2D2D2D2D2D2D2D); // Split constant
+                body.push(0x7C); // i64.add
+            }
+            // Economy Fog functions
+            "create_pool" => {
+                // create_pool(asset1: i64, asset2: i64) -> i64
+                // Returns pool_id
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 1);
+                body.push(0x7C); // i64.add
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 0x5050505050505050); // Pool constant
+                body.push(0x7C); // i64.add
+            }
+            "swap" => {
+                // swap(pool: i64, amount_in: i64, asset_in: i64) -> i64
+                // Returns amount_out (simplified: amount_in * 95 / 100 for 5% fee)
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 1); // amount_in
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 95);
+                body.push(0x7E); // i64.mul
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 100);
+                body.push(0x7F); // i64.div_s
+            }
+            "add_liquidity" => {
+                // add_liquidity(pool: i64, amount1: i64, amount2: i64) -> i64
+                // Returns shares (geometric mean of amounts)
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 1);
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 2);
+                body.push(0x7E); // i64.mul
+                // Simplified: return sqrt approximation (just use average for now)
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 2);
+                body.push(0x7F); // i64.div_s
+            }
+            "remove_liquidity" => {
+                // remove_liquidity(pool: i64, shares: i64) -> i64
+                // Returns amount1 (simplified: shares * 2)
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 1);
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 2);
+                body.push(0x7E); // i64.mul
+            }
+            // Quest Haze functions
+            "create_quest" => {
+                // create_quest(quest_id: i64, requirements: i64) -> i64
+                // Returns quest_status (1 = active)
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 1); // Status: active
+            }
+            "complete_quest" => {
+                // complete_quest(quest_id: i64) -> i64
+                // Returns reward amount
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 100); // Base reward
+                body.push(0x7E); // i64.mul
+            }
+            "verify_quest" => {
+                // verify_quest(quest_id: i64) -> i64
+                // Returns verification status (1 = verified, 0 = not verified)
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 0);
+                body.push(0x51); // i64.gt_s
+                body.push(0x04); // if
+                body.push(0x7E);
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 1); // verified
+                body.push(0x05); // else
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 0); // not verified
+                body.push(0x0B); // end
+            }
+            // Battle Smoke functions
+            "initiate_battle" => {
+                // initiate_battle(player1: i64, player2: i64) -> i64
+                // Returns battle_id
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 1);
+                body.push(0x7C); // i64.add
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 0xB4B4B4B4B4B4B4u64 as i64); // Battle constant
+                body.push(0x7C); // i64.add
+            }
+            "resolve_battle" => {
+                // resolve_battle(battle_id: i64) -> i64
+                // Returns winner (1 = player1, 2 = player2, 0 = draw)
+                // Simplified: return based on battle_id parity
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 2);
+                body.push(0x7F); // i64.rem_s (modulo)
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 1);
+                body.push(0x7C); // i64.add
+            }
+            "claim_rewards" => {
+                // claim_rewards(battle_id: i64) -> i64
+                // Returns reward amount
+                body.push(0x20); // local.get
+                encode_leb128_u32(&mut body, 0);
+                body.push(0x42); // i64.const
+                encode_leb128_i64(&mut body, 50); // Base reward multiplier
+                body.push(0x7E); // i64.mul
+            }
+            _ => {
+                // Default: return first parameter or 0
+                if param_count > 0 {
+                    body.push(0x20); // local.get
+                    encode_leb128_u32(&mut body, 0);
+                } else {
+                    body.push(0x42); // i64.const
+                    encode_leb128_i64(&mut body, 0);
+                }
+            }
+        }
+        
+        body.push(0x0B); // end
+        Ok(body)
     }
 
 }
