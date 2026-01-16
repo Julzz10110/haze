@@ -92,7 +92,29 @@ On first run, a `haze_config.json` file is created with default settings. You ca
 
 ## Usage
 
-### Basic Example
+### TypeScript SDK
+
+TypeScript SDK v0.1 is available in the `sdk/` directory. See [SDK README](sdk/README.md) for detailed documentation.
+
+Quick start:
+
+```bash
+cd sdk
+npm install
+npm run build
+```
+
+Example usage:
+
+```typescript
+import { HazeClient, KeyPair, DEFAULT_API_URL } from '@haze/sdk';
+
+const client = new HazeClient({ baseUrl: DEFAULT_API_URL });
+const keyPair = await KeyPair.generate();
+const info = await client.getBlockchainInfo();
+```
+
+### Rust API
 
 Run the API usage example:
 
