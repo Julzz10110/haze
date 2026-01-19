@@ -20,8 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
-use crate::types::{Transaction, AssetAction, AssetData, DensityLevel, Attribute};
-use crate::types::sha256;
+use crate::types::{Transaction, AssetAction};
 
 // Use std::result::Result for API handlers to avoid conflict with crate::error::Result
 type ApiResult<T> = std::result::Result<T, StatusCode>;
@@ -348,136 +347,40 @@ async fn get_asset(
     }
 }
 
-/// Create asset request
-#[derive(Debug, Deserialize)]
-pub struct CreateAssetRequest {
-    pub owner: String,
-    pub density: String,
-    pub metadata: std::collections::HashMap<String, String>,
-    pub attributes: Option<Vec<AttributeRequest>>,
-    pub game_id: Option<String>,
-    pub asset_id_seed: Option<String>, // Optional seed for deterministic asset ID
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AttributeRequest {
-    pub name: String,
-    pub value: String,
-    pub rarity: Option<f64>,
-}
-
 /// Create asset
+///
+/// Expects a **signed** `Transaction::MistbornAsset { action: Create, ... }`.
+/// The server does not sign transactions on behalf of clients.
 async fn create_asset(
     State(api_state): State<ApiState>,
-    Json(request): Json<CreateAssetRequest>,
-) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    // Parse owner address
-    let address_bytes = hex::decode(&request.owner)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if address_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut owner = [0u8; 32];
-    owner.copy_from_slice(&address_bytes);
-    
-    // Parse density level
-    let density = match request.density.as_str() {
-        "Ethereal" => DensityLevel::Ethereal,
-        "Light" => DensityLevel::Light,
-        "Dense" => DensityLevel::Dense,
-        "Core" => DensityLevel::Core,
+    Json(request): Json<SendTransactionRequest>,
+) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
+    let tx = request.transaction;
+
+    // Must be a signed Create tx
+    let (action, asset_id, signature) = match &tx {
+        Transaction::MistbornAsset { action, asset_id, signature, .. } => (action, asset_id, signature),
         _ => return Err(StatusCode::BAD_REQUEST),
     };
-    
-    // Generate asset ID
-    let asset_id = if let Some(seed) = &request.asset_id_seed {
-        sha256(seed.as_bytes())
-    } else {
-        // Generate from owner + metadata + timestamp
-        let mut seed_data = Vec::new();
-        seed_data.extend_from_slice(&owner);
-        seed_data.extend_from_slice(&serde_json::to_vec(&request.metadata).unwrap_or_default());
-        seed_data.extend_from_slice(&chrono::Utc::now().timestamp().to_le_bytes());
-        sha256(&seed_data)
-    };
-    
-    // Check if asset already exists
-    if api_state.state.get_asset(&asset_id).is_some() {
+
+    if !matches!(action, AssetAction::Create) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if signature.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if api_state.state.get_asset(asset_id).is_some() {
         return Err(StatusCode::CONFLICT);
     }
-    
-    // Convert attributes
-    let attributes: Vec<Attribute> = request.attributes
-        .unwrap_or_default()
-        .into_iter()
-        .map(|a| Attribute {
-            name: a.name,
-            value: a.value,
-            rarity: a.rarity,
-        })
-        .collect();
-    
-    // Create asset data
-    let asset_data = AssetData {
-        density,
-        metadata: request.metadata,
-        attributes,
-        game_id: request.game_id,
-        owner,
-    };
-    
-    // Create transaction
-    let transaction = Transaction::MistbornAsset {
-        action: AssetAction::Create,
-        asset_id,
-        data: asset_data,
-        signature: vec![], // Will be signed by client
-    };
-    
-    // Add transaction to pool
-    match api_state.consensus.add_transaction(transaction) {
-        Ok(()) => {
-            let response = serde_json::json!({
-                "asset_id": hex::encode(asset_id),
-                "status": "pending",
-                "message": "Asset creation transaction submitted"
-            });
-            Ok(Json(ApiResponse::success(response)))
-        }
+
+    let tx_hash = tx.hash();
+    match api_state.consensus.add_transaction(tx) {
+        Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
+            hash: hex::encode(tx_hash),
+            status: "pending".to_string(),
+        }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
     }
-}
-
-/// Condense asset request
-#[derive(Debug, Deserialize)]
-pub struct CondenseAssetRequest {
-    pub owner: String,
-    pub new_density: String,
-    pub additional_metadata: Option<std::collections::HashMap<String, String>>,
-    pub additional_attributes: Option<Vec<AttributeRequest>>,
-}
-
-/// Evaporate asset request
-#[derive(Debug, Deserialize)]
-pub struct EvaporateAssetRequest {
-    pub owner: String,
-    pub new_density: String,
-}
-
-/// Merge assets request
-#[derive(Debug, Deserialize)]
-pub struct MergeAssetsRequest {
-    pub owner: String,
-    pub other_asset_id: String,
-}
-
-/// Split asset request
-#[derive(Debug, Deserialize)]
-pub struct SplitAssetRequest {
-    pub owner: String,
-    pub components: Vec<String>,
 }
 
 /// Search assets query parameters
@@ -490,321 +393,118 @@ pub struct SearchAssetsQuery {
 }
 
 /// Condense asset (increase density)
+///
+/// Expects a **signed** `Transaction::MistbornAsset { action: Condense, asset_id: <path>, ... }`.
 async fn condense_asset(
     State(api_state): State<ApiState>,
     Path(asset_id_str): Path<String>,
-    Json(request): Json<CondenseAssetRequest>,
-) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str)
+    Json(request): Json<SendTransactionRequest>,
+) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
+    let path_asset_id_bytes = hex::decode(&asset_id_str)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     
-    if asset_id_bytes.len() != 32 {
+    if path_asset_id_bytes.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
     }
     
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
-    
-    // Get current asset
-    let asset_state = api_state.state.get_asset(&asset_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    
-    // Verify ownership
-    let owner_bytes = hex::decode(&request.owner)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if owner_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut owner = [0u8; 32];
-    owner.copy_from_slice(&owner_bytes);
-    
-    if asset_state.owner != owner {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    
-    // Parse new density
-    let new_density = match request.new_density.as_str() {
-        "Ethereal" => DensityLevel::Ethereal,
-        "Light" => DensityLevel::Light,
-        "Dense" => DensityLevel::Dense,
-        "Core" => DensityLevel::Core,
+    let mut path_asset_id = [0u8; 32];
+    path_asset_id.copy_from_slice(&path_asset_id_bytes);
+
+    let tx = request.transaction;
+    let (action, asset_id, signature) = match &tx {
+        Transaction::MistbornAsset { action, asset_id, signature, .. } => (action, asset_id, signature),
         _ => return Err(StatusCode::BAD_REQUEST),
     };
-    
-    // Check density increase
-    if new_density as u8 <= asset_state.data.density as u8 {
+
+    if !matches!(action, AssetAction::Condense) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    
-    // Prepare asset data
-    let mut metadata = asset_state.data.metadata.clone();
-    if let Some(additional) = request.additional_metadata {
-        metadata.extend(additional);
+    if *asset_id != path_asset_id {
+        return Err(StatusCode::BAD_REQUEST);
     }
-    
-    let mut attributes = asset_state.data.attributes.clone();
-    if let Some(additional) = request.additional_attributes {
-        attributes.extend(additional.into_iter().map(|a| Attribute {
-            name: a.name,
-            value: a.value,
-            rarity: a.rarity,
-        }));
+    if signature.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
     }
-    
-    let asset_data = AssetData {
-        density: new_density,
-        metadata,
-        attributes,
-        game_id: asset_state.data.game_id.clone(),
-        owner,
-    };
-    
-    let transaction = Transaction::MistbornAsset {
-        action: AssetAction::Condense,
-        asset_id,
-        data: asset_data,
-        signature: vec![],
-    };
-    
-    match api_state.consensus.add_transaction(transaction) {
-        Ok(()) => {
-            let response = serde_json::json!({
-                "asset_id": hex::encode(asset_id),
-                "status": "pending",
-                "message": "Condense transaction submitted"
-            });
-            Ok(Json(ApiResponse::success(response)))
-        }
+    if api_state.state.get_asset(&path_asset_id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let tx_hash = tx.hash();
+    match api_state.consensus.add_transaction(tx) {
+        Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
+            hash: hex::encode(tx_hash),
+            status: "pending".to_string(),
+        }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
     }
 }
 
 /// Evaporate asset (decrease density)
+///
+/// Expects a **signed** `Transaction::MistbornAsset { action: Evaporate, asset_id: <path>, ... }`.
 async fn evaporate_asset(
     State(api_state): State<ApiState>,
     Path(asset_id_str): Path<String>,
-    Json(request): Json<EvaporateAssetRequest>,
-) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str)
+    Json(request): Json<SendTransactionRequest>,
+) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
+    let path_asset_id_bytes = hex::decode(&asset_id_str)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     
-    if asset_id_bytes.len() != 32 {
+    if path_asset_id_bytes.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
     }
     
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
-    
-    let asset_state = api_state.state.get_asset(&asset_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    
-    let owner_bytes = hex::decode(&request.owner)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if owner_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut owner = [0u8; 32];
-    owner.copy_from_slice(&owner_bytes);
-    
-    if asset_state.owner != owner {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    
-    let new_density = match request.new_density.as_str() {
-        "Ethereal" => DensityLevel::Ethereal,
-        "Light" => DensityLevel::Light,
-        "Dense" => DensityLevel::Dense,
-        "Core" => DensityLevel::Core,
+    let mut path_asset_id = [0u8; 32];
+    path_asset_id.copy_from_slice(&path_asset_id_bytes);
+
+    let tx = request.transaction;
+    let (action, asset_id, signature) = match &tx {
+        Transaction::MistbornAsset { action, asset_id, signature, .. } => (action, asset_id, signature),
         _ => return Err(StatusCode::BAD_REQUEST),
     };
-    
-    if new_density as u8 >= asset_state.data.density as u8 {
+
+    if !matches!(action, AssetAction::Evaporate) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    
-    let asset_data = AssetData {
-        density: new_density,
-        metadata: asset_state.data.metadata.clone(),
-        attributes: asset_state.data.attributes.clone(),
-        game_id: asset_state.data.game_id.clone(),
-        owner,
-    };
-    
-    let transaction = Transaction::MistbornAsset {
-        action: AssetAction::Evaporate,
-        asset_id,
-        data: asset_data,
-        signature: vec![],
-    };
-    
-    match api_state.consensus.add_transaction(transaction) {
-        Ok(()) => {
-            let response = serde_json::json!({
-                "asset_id": hex::encode(asset_id),
-                "status": "pending",
-                "message": "Evaporate transaction submitted"
-            });
-            Ok(Json(ApiResponse::success(response)))
-        }
+    if *asset_id != path_asset_id {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if signature.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if api_state.state.get_asset(&path_asset_id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let tx_hash = tx.hash();
+    match api_state.consensus.add_transaction(tx) {
+        Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
+            hash: hex::encode(tx_hash),
+            status: "pending".to_string(),
+        }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
     }
 }
 
 /// Merge two assets
 async fn merge_assets(
-    State(api_state): State<ApiState>,
-    Path(asset_id_str): Path<String>,
-    Json(request): Json<MergeAssetsRequest>,
-) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let other_asset_id_bytes = hex::decode(&request.other_asset_id)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if asset_id_bytes.len() != 32 || other_asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
-    let mut other_asset_id = [0u8; 32];
-    other_asset_id.copy_from_slice(&other_asset_id_bytes);
-    
-    let asset_state = api_state.state.get_asset(&asset_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let other_asset_state = api_state.state.get_asset(&other_asset_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    
-    let owner_bytes = hex::decode(&request.owner)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if owner_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut owner = [0u8; 32];
-    owner.copy_from_slice(&owner_bytes);
-    
-    if asset_state.owner != owner || other_asset_state.owner != owner {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    
-    // Merge metadata and attributes
-    let mut metadata = asset_state.data.metadata.clone();
-    for (key, value) in &other_asset_state.data.metadata {
-        if !metadata.contains_key(key) {
-            metadata.insert(key.clone(), value.clone());
-        }
-    }
-    
-    let mut attributes = asset_state.data.attributes.clone();
-    attributes.extend(other_asset_state.data.attributes.clone());
-    
-    // Use higher density
-    let density = if other_asset_state.data.density as u8 > asset_state.data.density as u8 {
-        other_asset_state.data.density
-    } else {
-        asset_state.data.density
-    };
-    
-    let asset_data = AssetData {
-        density,
-        metadata,
-        attributes,
-        game_id: asset_state.data.game_id.clone(),
-        owner,
-    };
-    
-    let transaction = Transaction::MistbornAsset {
-        action: AssetAction::Merge,
-        asset_id,
-        data: asset_data,
-        signature: vec![],
-    };
-    
-    match api_state.consensus.add_transaction(transaction) {
-        Ok(()) => {
-            let response = serde_json::json!({
-                "asset_id": hex::encode(asset_id),
-                "merged_asset_id": hex::encode(other_asset_id),
-                "status": "pending",
-                "message": "Merge transaction submitted"
-            });
-            Ok(Json(ApiResponse::success(response)))
-        }
-        Err(_) => Err(StatusCode::BAD_REQUEST),
-    }
+    State(_api_state): State<ApiState>,
+    Path(_asset_id_str): Path<String>,
+    Json(_request): Json<SendTransactionRequest>,
+) -> ApiResult<Json<ApiResponse<&'static str>>> {
+    // Not yet supported: current MistbornAsset signing format doesn't include "other_asset_id"
+    // and state transition requires special handling.
+    Err(StatusCode::NOT_IMPLEMENTED)
 }
 
 /// Split asset into components
 async fn split_asset(
-    State(api_state): State<ApiState>,
-    Path(asset_id_str): Path<String>,
-    Json(request): Json<SplitAssetRequest>,
-) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
-    
-    let asset_state = api_state.state.get_asset(&asset_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    
-    let owner_bytes = hex::decode(&request.owner)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if owner_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut owner = [0u8; 32];
-    owner.copy_from_slice(&owner_bytes);
-    
-    if asset_state.owner != owner {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    
-    // Create split transactions for each component
-    let mut created_assets = Vec::new();
-    for component_name in &request.components {
-        let component_asset_id = sha256(&[
-            &asset_id,
-            component_name.as_bytes(),
-        ].concat());
-        
-        let mut component_metadata = std::collections::HashMap::new();
-        if let Some(value) = asset_state.data.metadata.get(component_name) {
-            component_metadata.insert(component_name.clone(), value.clone());
-        }
-        
-        let asset_data = AssetData {
-            density: DensityLevel::Ethereal,
-            metadata: component_metadata,
-            attributes: vec![],
-            game_id: asset_state.data.game_id.clone(),
-            owner,
-        };
-        
-        let transaction = Transaction::MistbornAsset {
-            action: AssetAction::Split,
-            asset_id: component_asset_id,
-            data: asset_data,
-            signature: vec![],
-        };
-        
-        if api_state.consensus.add_transaction(transaction).is_ok() {
-            created_assets.push(hex::encode(component_asset_id));
-        }
-    }
-    
-    let response = serde_json::json!({
-        "original_asset_id": hex::encode(asset_id),
-        "created_assets": created_assets,
-        "status": "pending",
-        "message": "Split transactions submitted"
-    });
-    Ok(Json(ApiResponse::success(response)))
+    State(_api_state): State<ApiState>,
+    Path(_asset_id_str): Path<String>,
+    Json(_request): Json<SendTransactionRequest>,
+) -> ApiResult<Json<ApiResponse<&'static str>>> {
+    // Not yet supported: split needs either batch txs or a richer signed payload.
+    Err(StatusCode::NOT_IMPLEMENTED)
 }
 
 /// Search assets

@@ -4,8 +4,8 @@
  */
 
 import * as ed25519 from '@noble/ed25519';
-import { Address, Hash } from './types';
-import { sha256, bytesToHex, hexToBytes } from './utils';
+import { Address, Hash, Transaction, AssetAction, DensityLevel } from './types';
+import { bytesToHex, hexToBytes } from './utils';
 
 /**
  * Key pair for signing transactions
@@ -48,7 +48,8 @@ export class KeyPair {
    * Get address from public key (SHA256 of public key)
    */
   getAddress(): Address {
-    return sha256(this.publicKey);
+    // Rust node treats Address as the 32-byte ED25519 public key.
+    return this.publicKey;
   }
 
   /**
@@ -118,29 +119,99 @@ export class KeyPair {
  * Transaction is serialized to bytes, hashed, and then signed
  */
 export async function signTransaction(
-  transaction: any,
+  transaction: Transaction,
   keyPair: KeyPair
 ): Promise<Uint8Array> {
-  // Serialize transaction (excluding signature field)
-  const txData = JSON.stringify(transaction, (key, value) => {
-    // Skip signature field when serializing
-    if (key === 'signature') {
-      return undefined;
-    }
-    // Convert bigint to string for JSON
-    if (typeof value === 'bigint') {
-      return value.toString();
-    }
-    // Convert Uint8Array to hex
-    if (value instanceof Uint8Array) {
-      return bytesToHex(value);
-    }
-    return value;
-  });
+  const message = getTransactionDataForSigning(transaction);
+  return await keyPair.sign(message);
+}
 
-  // Hash the serialized transaction
-  const hash = sha256(Buffer.from(txData, 'utf-8'));
+function u64le(value: bigint): Uint8Array {
+  if (value < 0n || value > 18446744073709551615n) {
+    throw new Error('Value out of u64 range');
+  }
+  const out = new Uint8Array(8);
+  let v = value;
+  for (let i = 0; i < 8; i++) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return out;
+}
 
-  // Sign the hash
-  return await keyPair.signHash(hash);
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const len = chunks.reduce((sum, c) => sum + c.length, 0);
+  const out = new Uint8Array(len);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  return out;
+}
+
+function actionToByte(action: AssetAction): number {
+  switch (action) {
+    case AssetAction.Create: return 0;
+    case AssetAction.Update: return 1;
+    case AssetAction.Condense: return 2;
+    case AssetAction.Evaporate: return 3;
+    case AssetAction.Merge: return 4;
+    case AssetAction.Split: return 5;
+  }
+}
+
+function densityToByte(density: DensityLevel): number {
+  switch (density) {
+    case DensityLevel.Ethereal: return 0;
+    case DensityLevel.Light: return 1;
+    case DensityLevel.Dense: return 2;
+    case DensityLevel.Core: return 3;
+  }
+}
+
+/**
+ * Must exactly match Rust `ConsensusEngine::get_transaction_data_for_signing`.
+ */
+export function getTransactionDataForSigning(tx: Transaction): Uint8Array {
+  const enc = new TextEncoder();
+
+  switch (tx.type) {
+    case 'Transfer': {
+      return concatBytes([
+        enc.encode('Transfer'),
+        tx.from,
+        tx.to,
+        u64le(tx.amount),
+        u64le(tx.fee),
+        u64le(BigInt(tx.nonce)),
+      ]);
+    }
+    case 'Stake': {
+      return concatBytes([
+        enc.encode('Stake'),
+        tx.validator,
+        u64le(tx.amount),
+      ]);
+    }
+    case 'ContractCall': {
+      return concatBytes([
+        enc.encode('ContractCall'),
+        tx.contract,
+        enc.encode(tx.method),
+        new Uint8Array([0]),
+        u64le(tx.gas_limit),
+        tx.args,
+      ]);
+    }
+    case 'MistbornAsset': {
+      return concatBytes([
+        enc.encode('MistbornAsset'),
+        new Uint8Array([actionToByte(tx.action)]),
+        tx.asset_id,
+        tx.data.owner,
+        new Uint8Array([densityToByte(tx.data.density)]),
+      ]);
+    }
+  }
 }
