@@ -54,11 +54,15 @@ async fn main() -> Result<()> {
     let mut network = Network::new(config.clone(), consensus.clone()).await?;
     info!("Network layer initialized");
 
+    // Initialize WebSocket broadcast channel
+    let (ws_tx, _) = tokio::sync::broadcast::channel::<crate::api::WsEvent>(100);
+    
     // Initialize API server
-    let api_state = ApiState {
+    let api_state = crate::api::ApiState {
         consensus: consensus.clone(),
         state: state_manager.clone(),
         config: config.clone(),
+        ws_tx: ws_tx.clone(),
     };
     info!("API server state initialized");
 

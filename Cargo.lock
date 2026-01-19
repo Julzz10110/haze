@@ -1248,6 +1248,7 @@ dependencies = [
  "dashmap",
  "ed25519-dalek",
  "futures",
+ "futures-util",
  "hex",
  "libp2p",
  "libp2p-request-response",

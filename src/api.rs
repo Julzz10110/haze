@@ -10,13 +10,16 @@
 
 use std::sync::Arc;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, State, ws::WebSocketUpgrade},
     http::StatusCode,
     response::Json,
     routing::{get, post},
     Router,
 };
+use axum::extract::ws::Message;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
+use futures_util::{SinkExt, StreamExt};
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
@@ -25,12 +28,67 @@ use crate::types::{Transaction, AssetAction};
 // Use std::result::Result for API handlers to avoid conflict with crate::error::Result
 type ApiResult<T> = std::result::Result<T, StatusCode>;
 
+/// WebSocket event types
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum WsEvent {
+    #[serde(rename = "asset_created")]
+    AssetCreated {
+        asset_id: String,
+        owner: String,
+        density: String,
+    },
+    #[serde(rename = "asset_updated")]
+    AssetUpdated {
+        asset_id: String,
+        owner: String,
+    },
+    #[serde(rename = "asset_condensed")]
+    AssetCondensed {
+        asset_id: String,
+        new_density: String,
+    },
+    #[serde(rename = "asset_evaporated")]
+    AssetEvaporated {
+        asset_id: String,
+        new_density: String,
+    },
+    #[serde(rename = "asset_merged")]
+    AssetMerged {
+        asset_id: String,
+        merged_asset_id: String,
+    },
+    #[serde(rename = "asset_split")]
+    AssetSplit {
+        asset_id: String,
+        created_assets: Vec<String>,
+    },
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
+/// WebSocket subscription request
+#[derive(Debug, Deserialize)]
+pub struct WsSubscribeRequest {
+    pub subscribe: Vec<WsSubscription>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WsSubscription {
+    #[serde(rename = "type")]
+    pub sub_type: String,
+    pub asset_id: Option<String>,
+    pub owner: Option<String>,
+    pub game_id: Option<String>,
+}
+
 /// API state shared across handlers
 #[derive(Clone)]
 pub struct ApiState {
     pub consensus: Arc<ConsensusEngine>,
     pub state: Arc<StateManager>,
     pub config: Config,
+    pub ws_tx: broadcast::Sender<WsEvent>,
 }
 
 /// API response wrapper
@@ -124,6 +182,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/api/v1/economy/pools", get(get_liquidity_pools))
         .route("/api/v1/economy/pools", post(create_liquidity_pool))
         .route("/api/v1/economy/pools/:pool_id", get(get_liquidity_pool))
+        .route("/api/v1/ws", get(ws_handler))
         .with_state(state);
     
     // Add CORS if enabled
@@ -650,6 +709,91 @@ async fn get_liquidity_pool(
     }
 }
 
+/// WebSocket handler
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(api_state): State<ApiState>,
+) -> axum::response::Response {
+    ws.on_upgrade(|socket| handle_socket(socket, api_state))
+}
+
+/// Handle WebSocket connection
+async fn handle_socket(socket: axum::extract::ws::WebSocket, state: ApiState) {
+    use futures_util::{SinkExt, StreamExt};
+    let (mut sender, mut receiver) = socket.split();
+    let mut rx = state.ws_tx.subscribe();
+    let subscriptions = Arc::new(tokio::sync::Mutex::new(Vec::<WsSubscription>::new()));
+
+    // Clone Arc for send task
+    let subscriptions_send = Arc::clone(&subscriptions);
+    // Spawn task to send events to client
+    let mut send_task = tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            // Check if event matches any subscription
+            let subs = subscriptions_send.lock().await;
+            let should_send = subs.is_empty() || subs.iter().any(|sub| {
+                match (&sub.sub_type[..], &event) {
+                    ("asset_created", WsEvent::AssetCreated { asset_id, owner, .. }) => {
+                        sub.asset_id.as_ref().map(|id| id == asset_id).unwrap_or(true) &&
+                        sub.owner.as_ref().map(|o| o == owner).unwrap_or(true)
+                    }
+                    ("asset_updated", WsEvent::AssetUpdated { asset_id, owner, .. }) => {
+                        sub.asset_id.as_ref().map(|id| id == asset_id).unwrap_or(true) &&
+                        sub.owner.as_ref().map(|o| o == owner).unwrap_or(true)
+                    }
+                    ("asset_condensed", WsEvent::AssetCondensed { asset_id, .. }) => {
+                        sub.asset_id.as_ref().map(|id| id == asset_id).unwrap_or(true)
+                    }
+                    ("asset_evaporated", WsEvent::AssetEvaporated { asset_id, .. }) => {
+                        sub.asset_id.as_ref().map(|id| id == asset_id).unwrap_or(true)
+                    }
+                    ("asset_merged", WsEvent::AssetMerged { asset_id, .. }) => {
+                        sub.asset_id.as_ref().map(|id| id == asset_id).unwrap_or(true)
+                    }
+                    ("asset_split", WsEvent::AssetSplit { asset_id, .. }) => {
+                        sub.asset_id.as_ref().map(|id| id == asset_id).unwrap_or(true)
+                    }
+                    _ => false,
+                }
+            });
+            drop(subs); // Release lock before potential await
+
+            if should_send {
+                if let Ok(json) = serde_json::to_string(&event) {
+                    if sender.send(Message::Text(json)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    // Clone Arc for receive task
+    let subscriptions_recv = Arc::clone(&subscriptions);
+    // Spawn task to receive messages from client
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = receiver.next().await {
+            if let Message::Text(text) = msg {
+                if let Ok(request) = serde_json::from_str::<WsSubscribeRequest>(&text) {
+                    let mut subs = subscriptions_recv.lock().await;
+                    *subs = request.subscribe;
+                }
+            }
+        }
+    });
+
+    // Wait for either task to complete
+    tokio::select! {
+        _ = (&mut send_task) => recv_task.abort(),
+        _ = (&mut recv_task) => send_task.abort(),
+    };
+}
+
+/// Broadcast asset event to all WebSocket clients
+pub fn broadcast_asset_event(tx: &broadcast::Sender<WsEvent>, event: WsEvent) {
+    let _ = tx.send(event);
+}
+
 /// Start API server
 pub async fn start_api_server(state: ApiState) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let app = create_router(state.clone());
@@ -658,6 +802,7 @@ pub async fn start_api_server(state: ApiState) -> std::result::Result<(), Box<dy
     tracing::info!("API server listening on http://{}", state.config.api.listen_addr);
     tracing::info!("Health check: http://{}/health", state.config.api.listen_addr);
     tracing::info!("API docs: http://{}/api/v1/blockchain/info", state.config.api.listen_addr);
+    tracing::info!("WebSocket: ws://{}/api/v1/ws", state.config.api.listen_addr);
     
     axum::serve(listener, app).await?;
     
@@ -679,10 +824,12 @@ mod tests {
         let state = Arc::new(StateManager::new(&config).unwrap());
         let consensus = Arc::new(ConsensusEngine::new(config.clone(), state.clone()).unwrap());
         
+        let (ws_tx, _) = tokio::sync::broadcast::channel(100);
         ApiState {
             consensus,
             state,
             config,
+            ws_tx,
         }
     }
     
