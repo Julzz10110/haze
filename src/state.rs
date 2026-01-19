@@ -544,6 +544,11 @@ impl StateManager {
         &self.assets
     }
 
+    /// Get blocks map (for API access)
+    pub fn blocks(&self) -> &Arc<DashMap<Hash, Block>> {
+        &self.blocks
+    }
+
     #[cfg(test)]
     /// Create test account (for testing only)
     pub fn create_test_account(&self, address: Address, balance: u64, nonce: u64) {
@@ -664,5 +669,299 @@ mod tests {
         
         // Initial height should be 0
         assert_eq!(state_manager.current_height(), 0);
+    }
+
+    #[test]
+    fn test_merge_assets() {
+        let config = create_test_config("merge");
+        let state_manager = StateManager::new(&config).unwrap();
+        
+        let owner = create_test_address(1);
+        
+        // Create first asset
+        let asset_id_1 = crate::types::sha256(b"asset1");
+        let tx1 = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id: asset_id_1,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("name".to_string(), "Asset 1".to_string());
+                    m.insert("type".to_string(), "sword".to_string());
+                    m
+                },
+                attributes: vec![crate::types::Attribute {
+                    name: "damage".to_string(),
+                    value: "10".to_string(),
+                    rarity: None,
+                }],
+                game_id: Some("game1".to_string()),
+                owner,
+            },
+            signature: vec![1; 64], // Dummy signature for test
+        };
+        
+        state_manager.apply_transaction(&tx1).unwrap();
+        assert!(state_manager.get_asset(&asset_id_1).is_some());
+        
+        // Create second asset
+        let asset_id_2 = crate::types::sha256(b"asset2");
+        let tx2 = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id: asset_id_2,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Light,
+                metadata: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("name".to_string(), "Asset 2".to_string());
+                    m.insert("rarity".to_string(), "epic".to_string());
+                    m
+                },
+                attributes: vec![crate::types::Attribute {
+                    name: "defense".to_string(),
+                    value: "5".to_string(),
+                    rarity: None,
+                }],
+                game_id: Some("game1".to_string()),
+                owner,
+            },
+            signature: vec![2; 64],
+        };
+        
+        state_manager.apply_transaction(&tx2).unwrap();
+        assert!(state_manager.get_asset(&asset_id_2).is_some());
+        
+        // Merge assets
+        let mut merge_metadata = std::collections::HashMap::new();
+        merge_metadata.insert("_other_asset_id".to_string(), hex::encode(asset_id_2));
+        
+        let merge_tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Merge,
+            asset_id: asset_id_1,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: merge_metadata,
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![3; 64],
+        };
+        
+        state_manager.apply_transaction(&merge_tx).unwrap();
+        
+        // Check that merged asset exists and has combined data
+        let merged_asset = state_manager.get_asset(&asset_id_1).unwrap();
+        assert_eq!(merged_asset.owner, owner);
+        assert!(merged_asset.data.metadata.contains_key("name"));
+        assert!(merged_asset.data.metadata.contains_key("type"));
+        assert!(merged_asset.data.metadata.contains_key("rarity"));
+        // Density should be increased to Light (from asset 2)
+        assert_eq!(merged_asset.data.density, crate::types::DensityLevel::Light);
+        // Should have both attributes
+        assert_eq!(merged_asset.data.attributes.len(), 2);
+        
+        // Check that other asset is removed
+        assert!(state_manager.get_asset(&asset_id_2).is_none());
+    }
+
+    #[test]
+    fn test_merge_assets_different_owners() {
+        let config = create_test_config("merge_different_owners");
+        let state_manager = StateManager::new(&config).unwrap();
+        
+        let owner1 = create_test_address(1);
+        let owner2 = create_test_address(2);
+        
+        // Create first asset
+        let asset_id_1 = crate::types::sha256(b"asset1");
+        let tx1 = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id: asset_id_1,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner: owner1,
+            },
+            signature: vec![1; 64],
+        };
+        
+        state_manager.apply_transaction(&tx1).unwrap();
+        
+        // Create second asset with different owner
+        let asset_id_2 = crate::types::sha256(b"asset2");
+        let tx2 = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id: asset_id_2,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner: owner2,
+            },
+            signature: vec![2; 64],
+        };
+        
+        state_manager.apply_transaction(&tx2).unwrap();
+        
+        // Try to merge - should fail
+        let mut merge_metadata = std::collections::HashMap::new();
+        merge_metadata.insert("_other_asset_id".to_string(), hex::encode(asset_id_2));
+        
+        let merge_tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Merge,
+            asset_id: asset_id_1,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: merge_metadata,
+                attributes: vec![],
+                game_id: None,
+                owner: owner1,
+            },
+            signature: vec![3; 64],
+        };
+        
+        let result = state_manager.apply_transaction(&merge_tx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("different owners"));
+        
+        // Both assets should still exist
+        assert!(state_manager.get_asset(&asset_id_1).is_some());
+        assert!(state_manager.get_asset(&asset_id_2).is_some());
+    }
+
+    #[test]
+    fn test_split_asset() {
+        let config = create_test_config("split");
+        let state_manager = StateManager::new(&config).unwrap();
+        
+        let owner = create_test_address(1);
+        
+        // Create asset with multiple components
+        let asset_id = crate::types::sha256(b"composite_asset");
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("component1".to_string(), "sword_data".to_string());
+        metadata.insert("component2".to_string(), "shield_data".to_string());
+        metadata.insert("component3".to_string(), "armor_data".to_string());
+        
+        let tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Dense,
+                metadata: metadata.clone(),
+                attributes: vec![
+                    crate::types::Attribute {
+                        name: "power".to_string(),
+                        value: "100".to_string(),
+                        rarity: None,
+                    },
+                ],
+                game_id: Some("game1".to_string()),
+                owner,
+            },
+            signature: vec![1; 64],
+        };
+        
+        state_manager.apply_transaction(&tx).unwrap();
+        assert!(state_manager.get_asset(&asset_id).is_some());
+        
+        // Split asset into components
+        let mut split_metadata = std::collections::HashMap::new();
+        split_metadata.insert("_components".to_string(), "component1,component2,component3".to_string());
+        
+        let split_tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Split,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: split_metadata,
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![2; 64],
+        };
+        
+        state_manager.apply_transaction(&split_tx).unwrap();
+        
+        // Check that source asset is removed
+        assert!(state_manager.get_asset(&asset_id).is_none());
+        
+        // Check that component assets were created
+        let component1_id = crate::types::sha256(&[asset_id.as_ref(), b"component1"].concat());
+        let component2_id = crate::types::sha256(&[asset_id.as_ref(), b"component2"].concat());
+        let component3_id = crate::types::sha256(&[asset_id.as_ref(), b"component3"].concat());
+        
+        let comp1 = state_manager.get_asset(&component1_id).unwrap();
+        assert_eq!(comp1.owner, owner);
+        assert_eq!(comp1.data.metadata.get("component1"), Some(&"sword_data".to_string()));
+        assert_eq!(comp1.data.density, crate::types::DensityLevel::Ethereal);
+        
+        let comp2 = state_manager.get_asset(&component2_id).unwrap();
+        assert_eq!(comp2.owner, owner);
+        assert_eq!(comp2.data.metadata.get("component2"), Some(&"shield_data".to_string()));
+        
+        let comp3 = state_manager.get_asset(&component3_id).unwrap();
+        assert_eq!(comp3.owner, owner);
+        assert_eq!(comp3.data.metadata.get("component3"), Some(&"armor_data".to_string()));
+    }
+
+    #[test]
+    fn test_split_asset_invalid_owner() {
+        let config = create_test_config("split_invalid_owner");
+        let state_manager = StateManager::new(&config).unwrap();
+        
+        let owner1 = create_test_address(1);
+        let owner2 = create_test_address(2);
+        
+        // Create asset
+        let asset_id = crate::types::sha256(b"asset");
+        let tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("component1".to_string(), "data".to_string());
+                    m
+                },
+                attributes: vec![],
+                game_id: None,
+                owner: owner1,
+            },
+            signature: vec![1; 64],
+        };
+        
+        state_manager.apply_transaction(&tx).unwrap();
+        
+        // Try to split with wrong owner - should fail
+        let mut split_metadata = std::collections::HashMap::new();
+        split_metadata.insert("_components".to_string(), "component1".to_string());
+        
+        let split_tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Split,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: split_metadata,
+                attributes: vec![],
+                game_id: None,
+                owner: owner2, // Wrong owner
+            },
+            signature: vec![2; 64],
+        };
+        
+        let result = state_manager.apply_transaction(&split_tx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ownership mismatch"));
+        
+        // Asset should still exist
+        assert!(state_manager.get_asset(&asset_id).is_some());
     }
 }

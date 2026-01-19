@@ -230,7 +230,22 @@ async fn get_transaction(
         return Ok(Json(ApiResponse::success(response)));
     }
     
-    // TODO: Also check in blocks (executed transactions)
+    // Check in executed blocks
+    // Iterate through blocks to find the transaction
+    // Note: In production, this should use an index for better performance
+    for entry in api_state.state.blocks().iter() {
+        let block = entry.value();
+        for tx in &block.transactions {
+            if tx.hash() == hash {
+                let response = TransactionResponse {
+                    hash: hex::encode(hash),
+                    status: "executed".to_string(),
+                };
+                return Ok(Json(ApiResponse::success(response)));
+            }
+        }
+    }
+    
     Err(StatusCode::NOT_FOUND)
 }
 
