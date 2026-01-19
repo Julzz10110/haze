@@ -3,12 +3,15 @@
 use std::sync::Arc;
 use parking_lot::RwLock;
 use sled::Db;
+use tokio::sync::broadcast;
 use crate::types::{Address, Hash, Block, Transaction};
 use crate::config::Config;
 use crate::error::{HazeError, Result};
 use crate::tokenomics::Tokenomics;
 use crate::economy::FogEconomy;
+use crate::ws_events::WsEvent;
 use dashmap::DashMap;
+use hex;
 
 /// State manager for blockchain state
 pub struct StateManager {
@@ -19,6 +22,7 @@ pub struct StateManager {
     current_height: Arc<RwLock<u64>>,
     tokenomics: Arc<Tokenomics>,
     economy: Arc<FogEconomy>,
+    ws_tx: Arc<RwLock<Option<broadcast::Sender<WsEvent>>>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -71,7 +75,20 @@ impl StateManager {
             current_height: Arc::new(RwLock::new(0)),
             tokenomics: Arc::new(Tokenomics::new()),
             economy: Arc::new(FogEconomy::new()),
+            ws_tx: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Set WebSocket broadcaster for real-time event notifications
+    pub fn set_ws_tx(&self, tx: broadcast::Sender<WsEvent>) {
+        *self.ws_tx.write() = Some(tx);
+    }
+
+    /// Broadcast WebSocket event if broadcaster is available
+    fn broadcast_event(&self, event: WsEvent) {
+        if let Some(ref tx) = *self.ws_tx.read() {
+            let _ = tx.send(event);
+        }
     }
 
     /// Get account state by address
@@ -219,6 +236,13 @@ impl StateManager {
                             updated_at: chrono::Utc::now().timestamp(),
                         };
                         self.assets.insert(*asset_id, asset_state);
+                        
+                        // Broadcast WebSocket event
+                        self.broadcast_event(WsEvent::AssetCreated {
+                            asset_id: hex::encode(asset_id),
+                            owner: hex::encode(data.owner),
+                            density: format!("{:?}", data.density),
+                        });
                     }
                     crate::types::AssetAction::Update => {
                         let mut asset_state = self.assets.get(asset_id)
@@ -234,12 +258,21 @@ impl StateManager {
                             ));
                         }
                         
+                        // Save owner before moving asset_state
+                        let owner = asset_state.owner;
+                        
                         // Update metadata and attributes
                         asset_state.data.metadata = data.metadata.clone();
                         asset_state.data.attributes = data.attributes.clone();
                         asset_state.updated_at = chrono::Utc::now().timestamp();
                         
                         self.assets.insert(*asset_id, asset_state);
+                        
+                        // Broadcast WebSocket event
+                        self.broadcast_event(WsEvent::AssetUpdated {
+                            asset_id: hex::encode(asset_id),
+                            owner: hex::encode(owner),
+                        });
                     }
                     crate::types::AssetAction::Condense => {
                         let mut asset_state = self.assets.get(asset_id)
@@ -265,6 +298,7 @@ impl StateManager {
                         }
                         
                         // Update density and merge new data
+                        let new_density_str = format!("{:?}", data.density);
                         asset_state.data.density = data.density;
                         for (key, value) in &data.metadata {
                             asset_state.data.metadata.insert(key.clone(), value.clone());
@@ -273,6 +307,12 @@ impl StateManager {
                         asset_state.updated_at = chrono::Utc::now().timestamp();
                         
                         self.assets.insert(*asset_id, asset_state);
+                        
+                        // Broadcast WebSocket event
+                        self.broadcast_event(WsEvent::AssetCondensed {
+                            asset_id: hex::encode(asset_id),
+                            new_density: new_density_str,
+                        });
                     }
                     crate::types::AssetAction::Evaporate => {
                         let mut asset_state = self.assets.get(asset_id)
@@ -298,23 +338,167 @@ impl StateManager {
                         }
                         
                         // Update density
+                        let new_density_str = format!("{:?}", data.density);
                         asset_state.data.density = data.density;
                         asset_state.updated_at = chrono::Utc::now().timestamp();
                         
                         self.assets.insert(*asset_id, asset_state);
+                        
+                        // Broadcast WebSocket event
+                        self.broadcast_event(WsEvent::AssetEvaporated {
+                            asset_id: hex::encode(asset_id),
+                            new_density: new_density_str,
+                        });
                     }
                     crate::types::AssetAction::Merge => {
-                        // Merge requires two assets - this is handled differently
-                        // For now, we'll handle it as an update
-                        return Err(HazeError::InvalidTransaction(
-                            "Merge operation requires special handling with two asset IDs".to_string()
-                        ));
+                        // Merge requires two assets
+                        // Get other_asset_id from metadata (special key "_other_asset_id")
+                        let other_asset_id_str = data.metadata.get("_other_asset_id")
+                            .ok_or_else(|| HazeError::InvalidTransaction(
+                                "Merge operation requires '_other_asset_id' in metadata".to_string()
+                            ))?;
+                        
+                        let other_asset_id_bytes = hex::decode(other_asset_id_str)
+                            .map_err(|_| HazeError::InvalidTransaction(
+                                "Invalid '_other_asset_id' format".to_string()
+                            ))?;
+                        
+                        if other_asset_id_bytes.len() != 32 {
+                            return Err(HazeError::InvalidTransaction(
+                                "Invalid '_other_asset_id' length".to_string()
+                            ));
+                        }
+                        
+                        let mut other_asset_id = [0u8; 32];
+                        other_asset_id.copy_from_slice(&other_asset_id_bytes);
+                        
+                        // Get both assets
+                        let mut asset_state = self.assets.get(asset_id)
+                            .ok_or_else(|| HazeError::InvalidTransaction(
+                                "Source asset not found".to_string()
+                            ))?
+                            .clone();
+                        
+                        let other_asset_state = self.assets.get(&other_asset_id)
+                            .ok_or_else(|| HazeError::InvalidTransaction(
+                                "Other asset not found".to_string()
+                            ))?
+                            .clone();
+                        
+                        // Verify both assets have the same owner
+                        if asset_state.owner != other_asset_state.owner || asset_state.owner != data.owner {
+                            return Err(HazeError::InvalidTransaction(
+                                "Cannot merge assets with different owners".to_string()
+                            ));
+                        }
+                        
+                        // Merge metadata (excluding special keys)
+                        for (key, value) in &other_asset_state.data.metadata {
+                            if !key.starts_with('_') && !asset_state.data.metadata.contains_key(key) {
+                                asset_state.data.metadata.insert(key.clone(), value.clone());
+                            }
+                        }
+                        
+                        // Merge attributes
+                        asset_state.data.attributes.extend(other_asset_state.data.attributes.clone());
+                        
+                        // Increase density if needed
+                        if other_asset_state.data.density as u8 > asset_state.data.density as u8 {
+                            asset_state.data.density = other_asset_state.data.density;
+                        }
+                        
+                        asset_state.updated_at = chrono::Utc::now().timestamp();
+                        
+                        // Update source asset
+                        self.assets.insert(*asset_id, asset_state.clone());
+                        
+                        // Remove merged asset
+                        self.assets.remove(&other_asset_id);
+                        
+                        // Broadcast WebSocket event
+                        self.broadcast_event(WsEvent::AssetMerged {
+                            asset_id: hex::encode(asset_id),
+                            merged_asset_id: hex::encode(other_asset_id),
+                        });
                     }
                     crate::types::AssetAction::Split => {
-                        // Split creates new assets - handled differently
-                        return Err(HazeError::InvalidTransaction(
-                            "Split operation creates multiple assets and requires special handling".to_string()
-                        ));
+                        // Split creates new assets from components
+                        // Get components list from metadata (special key "_components")
+                        let components_str = data.metadata.get("_components")
+                            .ok_or_else(|| HazeError::InvalidTransaction(
+                                "Split operation requires '_components' in metadata".to_string()
+                            ))?;
+                        
+                        // Parse components (comma-separated list)
+                        let components: Vec<String> = components_str
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        
+                        if components.is_empty() {
+                            return Err(HazeError::InvalidTransaction(
+                                "Split requires at least one component".to_string()
+                            ));
+                        }
+                        
+                        // Get source asset
+                        let source_asset_state = self.assets.get(asset_id)
+                            .ok_or_else(|| HazeError::InvalidTransaction(
+                                "Source asset not found".to_string()
+                            ))?
+                            .clone();
+                        
+                        // Verify ownership
+                        if source_asset_state.owner != data.owner {
+                            return Err(HazeError::InvalidTransaction(
+                                "Asset ownership mismatch".to_string()
+                            ));
+                        }
+                        
+                        // Create new assets for each component
+                        let mut created_asset_ids = Vec::new();
+                        
+                        for component_name in &components {
+                            let mut component_data = crate::types::AssetData {
+                                density: crate::types::DensityLevel::Ethereal, // Start with minimum density
+                                metadata: std::collections::HashMap::new(),
+                                attributes: vec![],
+                                game_id: source_asset_state.data.game_id.clone(),
+                                owner: source_asset_state.owner,
+                            };
+                            
+                            // Extract component-specific metadata
+                            if let Some(value) = source_asset_state.data.metadata.get(component_name) {
+                                component_data.metadata.insert(component_name.clone(), value.clone());
+                            }
+                            
+                            // Generate component asset ID
+                            let component_asset_id = crate::types::sha256(&[
+                                asset_id.as_ref(),
+                                component_name.as_bytes(),
+                            ].concat());
+                            
+                            // Create component asset state
+                            let component_asset_state = AssetState {
+                                owner: source_asset_state.owner,
+                                data: component_data,
+                                created_at: chrono::Utc::now().timestamp(),
+                                updated_at: chrono::Utc::now().timestamp(),
+                            };
+                            
+                            self.assets.insert(component_asset_id, component_asset_state);
+                            created_asset_ids.push(hex::encode(component_asset_id));
+                        }
+                        
+                        // Remove or update source asset (for now, we remove it)
+                        self.assets.remove(asset_id);
+                        
+                        // Broadcast WebSocket event
+                        self.broadcast_event(WsEvent::AssetSplit {
+                            asset_id: hex::encode(asset_id),
+                            created_assets: created_asset_ids,
+                        });
                     }
                 }
             }
@@ -415,6 +599,7 @@ impl Clone for StateManager {
             current_height: self.current_height.clone(),
             tokenomics: self.tokenomics.clone(),
             economy: self.economy.clone(),
+            ws_tx: self.ws_tx.clone(),
         }
     }
 }

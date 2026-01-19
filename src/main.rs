@@ -15,6 +15,7 @@ mod error;
 mod tokenomics;
 mod economy;
 mod api;
+mod ws_events;
 
 use anyhow::Result;
 use tracing::{info, error};
@@ -55,7 +56,10 @@ async fn main() -> Result<()> {
     info!("Network layer initialized");
 
     // Initialize WebSocket broadcast channel
-    let (ws_tx, _) = tokio::sync::broadcast::channel::<crate::api::WsEvent>(100);
+    let (ws_tx, _) = tokio::sync::broadcast::channel::<crate::ws_events::WsEvent>(100);
+    
+    // Set WebSocket broadcaster in state manager
+    state_manager.set_ws_tx(ws_tx.clone());
     
     // Initialize API server
     let api_state = crate::api::ApiState {

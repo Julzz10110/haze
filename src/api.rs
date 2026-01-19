@@ -24,48 +24,10 @@ use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
 use crate::types::{Transaction, AssetAction};
+pub use crate::ws_events::WsEvent;
 
 // Use std::result::Result for API handlers to avoid conflict with crate::error::Result
 type ApiResult<T> = std::result::Result<T, StatusCode>;
-
-/// WebSocket event types
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-pub enum WsEvent {
-    #[serde(rename = "asset_created")]
-    AssetCreated {
-        asset_id: String,
-        owner: String,
-        density: String,
-    },
-    #[serde(rename = "asset_updated")]
-    AssetUpdated {
-        asset_id: String,
-        owner: String,
-    },
-    #[serde(rename = "asset_condensed")]
-    AssetCondensed {
-        asset_id: String,
-        new_density: String,
-    },
-    #[serde(rename = "asset_evaporated")]
-    AssetEvaporated {
-        asset_id: String,
-        new_density: String,
-    },
-    #[serde(rename = "asset_merged")]
-    AssetMerged {
-        asset_id: String,
-        merged_asset_id: String,
-    },
-    #[serde(rename = "asset_split")]
-    AssetSplit {
-        asset_id: String,
-        created_assets: Vec<String>,
-    },
-    #[serde(rename = "error")]
-    Error { message: String },
-}
 
 /// WebSocket subscription request
 #[derive(Debug, Deserialize)]
@@ -546,24 +508,126 @@ async fn evaporate_asset(
 }
 
 /// Merge two assets
+///
+/// Expects a **signed** `Transaction::MistbornAsset { action: Merge, asset_id: <path>, data: { metadata: { "_other_asset_id": "<hex>" } }, ... }`.
 async fn merge_assets(
-    State(_api_state): State<ApiState>,
-    Path(_asset_id_str): Path<String>,
-    Json(_request): Json<SendTransactionRequest>,
-) -> ApiResult<Json<ApiResponse<&'static str>>> {
-    // Not yet supported: current MistbornAsset signing format doesn't include "other_asset_id"
-    // and state transition requires special handling.
-    Err(StatusCode::NOT_IMPLEMENTED)
+    State(api_state): State<ApiState>,
+    Path(asset_id_str): Path<String>,
+    Json(request): Json<SendTransactionRequest>,
+) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
+    let path_asset_id_bytes = hex::decode(&asset_id_str)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    if path_asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let mut path_asset_id = [0u8; 32];
+    path_asset_id.copy_from_slice(&path_asset_id_bytes);
+    
+    let tx = request.transaction;
+    let (action, asset_id, signature, data) = match &tx {
+        Transaction::MistbornAsset { action, asset_id, signature, data } => (action, asset_id, signature, data),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    
+    if !matches!(action, AssetAction::Merge) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if *asset_id != path_asset_id {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if signature.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    // Verify _other_asset_id is present in metadata
+    let other_asset_id_str = data.metadata.get("_other_asset_id")
+        .ok_or_else(|| StatusCode::BAD_REQUEST)?;
+    
+    let other_asset_id_bytes = hex::decode(other_asset_id_str)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    if other_asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let mut other_asset_id = [0u8; 32];
+    other_asset_id.copy_from_slice(&other_asset_id_bytes);
+    
+    // Verify both assets exist
+    if api_state.state.get_asset(&path_asset_id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if api_state.state.get_asset(&other_asset_id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    
+    let tx_hash = tx.hash();
+    match api_state.consensus.add_transaction(tx) {
+        Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
+            hash: hex::encode(tx_hash),
+            status: "pending".to_string(),
+        }))),
+        Err(_) => Err(StatusCode::BAD_REQUEST),
+    }
 }
 
 /// Split asset into components
+///
+/// Expects a **signed** `Transaction::MistbornAsset { action: Split, asset_id: <path>, data: { metadata: { "_components": "component1,component2,..." } }, ... }`.
 async fn split_asset(
-    State(_api_state): State<ApiState>,
-    Path(_asset_id_str): Path<String>,
-    Json(_request): Json<SendTransactionRequest>,
-) -> ApiResult<Json<ApiResponse<&'static str>>> {
-    // Not yet supported: split needs either batch txs or a richer signed payload.
-    Err(StatusCode::NOT_IMPLEMENTED)
+    State(api_state): State<ApiState>,
+    Path(asset_id_str): Path<String>,
+    Json(request): Json<SendTransactionRequest>,
+) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
+    let path_asset_id_bytes = hex::decode(&asset_id_str)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    if path_asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let mut path_asset_id = [0u8; 32];
+    path_asset_id.copy_from_slice(&path_asset_id_bytes);
+    
+    let tx = request.transaction;
+    let (action, asset_id, signature, data) = match &tx {
+        Transaction::MistbornAsset { action, asset_id, signature, data } => (action, asset_id, signature, data),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    
+    if !matches!(action, AssetAction::Split) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if *asset_id != path_asset_id {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if signature.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    // Verify _components is present in metadata
+    let components_str = data.metadata.get("_components")
+        .ok_or_else(|| StatusCode::BAD_REQUEST)?;
+    
+    let components: Vec<&str> = components_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if components.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    if api_state.state.get_asset(&path_asset_id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    
+    let tx_hash = tx.hash();
+    match api_state.consensus.add_transaction(tx) {
+        Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
+            hash: hex::encode(tx_hash),
+            status: "pending".to_string(),
+        }))),
+        Err(_) => Err(StatusCode::BAD_REQUEST),
+    }
 }
 
 /// Search assets

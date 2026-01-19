@@ -512,6 +512,25 @@ impl ConsensusEngine {
                     crate::types::DensityLevel::Dense => 2,
                     crate::types::DensityLevel::Core => 3,
                 });
+                
+                // For Merge: include other_asset_id in signature
+                if matches!(action, crate::types::AssetAction::Merge) {
+                    if let Some(other_asset_id_str) = data.metadata.get("_other_asset_id") {
+                        if let Ok(other_asset_id_bytes) = hex::decode(other_asset_id_str) {
+                            if other_asset_id_bytes.len() == 32 {
+                                serialized.extend_from_slice(&other_asset_id_bytes);
+                            }
+                        }
+                    }
+                }
+                
+                // For Split: include components in signature
+                if matches!(action, crate::types::AssetAction::Split) {
+                    if let Some(components_str) = data.metadata.get("_components") {
+                        serialized.extend_from_slice(components_str.as_bytes());
+                    }
+                }
+                
                 serialized
             }
         }
