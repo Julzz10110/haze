@@ -202,14 +202,121 @@ impl StateManager {
                 // Process gas fee (burn 50%)
                 let _remaining_fee = self.tokenomics.process_gas_fee(*fee)?;
             }
-            Transaction::MistbornAsset { asset_id, data, .. } => {
-                let asset_state = AssetState {
-                    owner: data.owner,
-                    data: data.clone(),
-                    created_at: chrono::Utc::now().timestamp(),
-                    updated_at: chrono::Utc::now().timestamp(),
-                };
-                self.assets.insert(*asset_id, asset_state);
+            Transaction::MistbornAsset { action, asset_id, data, .. } => {
+                match action {
+                    crate::types::AssetAction::Create => {
+                        // Check if asset already exists
+                        if self.assets.contains_key(asset_id) {
+                            return Err(HazeError::InvalidTransaction(
+                                "Asset already exists".to_string()
+                            ));
+                        }
+                        
+                        let asset_state = AssetState {
+                            owner: data.owner,
+                            data: data.clone(),
+                            created_at: chrono::Utc::now().timestamp(),
+                            updated_at: chrono::Utc::now().timestamp(),
+                        };
+                        self.assets.insert(*asset_id, asset_state);
+                    }
+                    crate::types::AssetAction::Update => {
+                        let mut asset_state = self.assets.get(asset_id)
+                            .ok_or_else(|| HazeError::InvalidTransaction(
+                                "Asset not found".to_string()
+                            ))?
+                            .clone();
+                        
+                        // Verify ownership
+                        if asset_state.owner != data.owner {
+                            return Err(HazeError::InvalidTransaction(
+                                "Asset ownership mismatch".to_string()
+                            ));
+                        }
+                        
+                        // Update metadata and attributes
+                        asset_state.data.metadata = data.metadata.clone();
+                        asset_state.data.attributes = data.attributes.clone();
+                        asset_state.updated_at = chrono::Utc::now().timestamp();
+                        
+                        self.assets.insert(*asset_id, asset_state);
+                    }
+                    crate::types::AssetAction::Condense => {
+                        let mut asset_state = self.assets.get(asset_id)
+                            .ok_or_else(|| HazeError::InvalidTransaction(
+                                "Asset not found".to_string()
+                            ))?
+                            .clone();
+                        
+                        // Verify ownership
+                        if asset_state.owner != data.owner {
+                            return Err(HazeError::InvalidTransaction(
+                                "Asset ownership mismatch".to_string()
+                            ));
+                        }
+                        
+                        // Check if condensation is valid (can only increase density)
+                        let current_density = asset_state.data.density as u8;
+                        let new_density = data.density as u8;
+                        if new_density <= current_density {
+                            return Err(HazeError::InvalidTransaction(
+                                "Condensation must increase density".to_string()
+                            ));
+                        }
+                        
+                        // Update density and merge new data
+                        asset_state.data.density = data.density;
+                        for (key, value) in &data.metadata {
+                            asset_state.data.metadata.insert(key.clone(), value.clone());
+                        }
+                        asset_state.data.attributes.extend(data.attributes.clone());
+                        asset_state.updated_at = chrono::Utc::now().timestamp();
+                        
+                        self.assets.insert(*asset_id, asset_state);
+                    }
+                    crate::types::AssetAction::Evaporate => {
+                        let mut asset_state = self.assets.get(asset_id)
+                            .ok_or_else(|| HazeError::InvalidTransaction(
+                                "Asset not found".to_string()
+                            ))?
+                            .clone();
+                        
+                        // Verify ownership
+                        if asset_state.owner != data.owner {
+                            return Err(HazeError::InvalidTransaction(
+                                "Asset ownership mismatch".to_string()
+                            ));
+                        }
+                        
+                        // Check if evaporation is valid (can only decrease density)
+                        let current_density = asset_state.data.density as u8;
+                        let new_density = data.density as u8;
+                        if new_density >= current_density {
+                            return Err(HazeError::InvalidTransaction(
+                                "Evaporation must decrease density".to_string()
+                            ));
+                        }
+                        
+                        // Update density
+                        asset_state.data.density = data.density;
+                        asset_state.updated_at = chrono::Utc::now().timestamp();
+                        
+                        self.assets.insert(*asset_id, asset_state);
+                    }
+                    crate::types::AssetAction::Merge => {
+                        // Merge requires two assets - this is handled differently
+                        // For now, we'll handle it as an update
+                        return Err(HazeError::InvalidTransaction(
+                            "Merge operation requires special handling with two asset IDs".to_string()
+                        ));
+                    }
+                    crate::types::AssetAction::Split => {
+                        // Split creates new assets - handled differently
+                        return Err(HazeError::InvalidTransaction(
+                            "Split operation creates multiple assets and requires special handling".to_string()
+                        ));
+                    }
+                }
             }
             Transaction::Stake { validator, amount, .. } => {
                 let mut account = self.accounts
@@ -246,6 +353,11 @@ impl StateManager {
     /// Get economy instance
     pub fn economy(&self) -> &Arc<FogEconomy> {
         &self.economy
+    }
+
+    /// Get assets map (for API access)
+    pub fn assets(&self) -> &Arc<DashMap<Hash, AssetState>> {
+        &self.assets
     }
 
     #[cfg(test)]
