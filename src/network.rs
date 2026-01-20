@@ -27,6 +27,7 @@ use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::error::{HazeError, Result as HazeResult};
 use crate::types::{Block, Transaction};
+use hex;
 
 /// Network event
 #[derive(Debug, Clone)]
@@ -384,15 +385,25 @@ impl Network {
                             HazeRequest::Transaction(tx) => {
                                 tracing::debug!("Received transaction request");
                                 // Forward to consensus engine
-                                if let Err(e) = self.consensus.add_transaction(tx.clone()) {
-                                    tracing::warn!("Failed to add transaction: {}", e);
+                                match self.consensus.add_transaction(tx.clone()) {
+                                    Ok(()) => {
+                                        tracing::info!("Transaction added to pool: {}", hex::encode(tx.hash()));
+                                        // Send acknowledgment
+                                        let _ = self.swarm.behaviour_mut().transactions.send_response(
+                                            channel,
+                                            HazeResponse::TransactionAck,
+                                        );
+                                        let _ = self.event_sender.send(NetworkEvent::TransactionReceived(tx));
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to add transaction: {}", e);
+                                        // Send error response
+                                        let _ = self.swarm.behaviour_mut().transactions.send_response(
+                                            channel,
+                                            HazeResponse::Error(format!("Failed to add transaction: {}", e)),
+                                        );
+                                    }
                                 }
-                                // Send acknowledgment
-                                let _ = self.swarm.behaviour_mut().transactions.send_response(
-                                    channel,
-                                    HazeResponse::TransactionAck,
-                                );
-                                let _ = self.event_sender.send(NetworkEvent::TransactionReceived(tx));
                             }
                         }
                     }
@@ -417,25 +428,43 @@ impl Network {
                         match request {
                             HazeRequest::Block(block) => {
                                 tracing::debug!("Received block request via transactions protocol");
-                                if let Err(e) = self.consensus.process_block(&block) {
-                                    tracing::warn!("Failed to process block: {}", e);
+                                match self.consensus.process_block(&block) {
+                                    Ok(()) => {
+                                        tracing::info!("Block processed: height={}", block.header.height);
+                                        let _ = self.swarm.behaviour_mut().transactions.send_response(
+                                            channel,
+                                            HazeResponse::BlockAck,
+                                        );
+                                        let _ = self.event_sender.send(NetworkEvent::BlockReceived(block));
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to process block: {}", e);
+                                        let _ = self.swarm.behaviour_mut().transactions.send_response(
+                                            channel,
+                                            HazeResponse::Error(format!("Failed to process block: {}", e)),
+                                        );
+                                    }
                                 }
-                                let _ = self.swarm.behaviour_mut().transactions.send_response(
-                                    channel,
-                                    HazeResponse::BlockAck,
-                                );
-                                let _ = self.event_sender.send(NetworkEvent::BlockReceived(block));
                             }
                             HazeRequest::Transaction(tx) => {
                                 tracing::debug!("Received transaction request");
-                                if let Err(e) = self.consensus.add_transaction(tx.clone()) {
-                                    tracing::warn!("Failed to add transaction: {}", e);
+                                match self.consensus.add_transaction(tx.clone()) {
+                                    Ok(()) => {
+                                        tracing::info!("Transaction added to pool: {}", hex::encode(tx.hash()));
+                                        let _ = self.swarm.behaviour_mut().transactions.send_response(
+                                            channel,
+                                            HazeResponse::TransactionAck,
+                                        );
+                                        let _ = self.event_sender.send(NetworkEvent::TransactionReceived(tx));
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to add transaction: {}", e);
+                                        let _ = self.swarm.behaviour_mut().transactions.send_response(
+                                            channel,
+                                            HazeResponse::Error(format!("Failed to add transaction: {}", e)),
+                                        );
+                                    }
                                 }
-                                let _ = self.swarm.behaviour_mut().transactions.send_response(
-                                    channel,
-                                    HazeResponse::TransactionAck,
-                                );
-                                let _ = self.event_sender.send(NetworkEvent::TransactionReceived(tx));
                             }
                         }
                     }

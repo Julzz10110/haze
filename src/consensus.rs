@@ -176,6 +176,19 @@ impl ConsensusEngine {
         self.tx_pool.get(tx_hash).map(|tx| tx.clone())
     }
     
+    /// Remove transactions from pool (after they've been included in a block)
+    pub fn remove_transactions_from_pool(&self, transactions: &[Transaction]) {
+        for tx in transactions {
+            let tx_hash = tx.hash();
+            self.tx_pool.remove(&tx_hash);
+        }
+    }
+    
+    /// Get transaction pool size
+    pub fn tx_pool_size(&self) -> usize {
+        self.tx_pool.len()
+    }
+    
     /// Get current wave number (read access)
     pub fn get_current_wave(&self) -> u64 {
         *self.current_wave.read()
@@ -548,6 +561,9 @@ impl ConsensusEngine {
         for entry in self.tx_pool.iter().take(max_txs) {
             transactions.push(entry.value().clone());
         }
+        
+        // If no transactions, don't create empty block (for MVP, we can create empty blocks)
+        // But for better UX, we'll still create blocks even if empty
 
         // Get current height
         let height = self.state.current_height();
@@ -573,9 +589,12 @@ impl ConsensusEngine {
 
         let block = Block {
             header,
-            transactions,
+            transactions: transactions.clone(),
             dag_references: dag_refs,
         };
+        
+        // Remove transactions from pool after creating block
+        self.remove_transactions_from_pool(&transactions);
 
         Ok(block)
     }

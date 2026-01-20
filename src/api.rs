@@ -19,7 +19,7 @@ use axum::{
 use axum::extract::ws::Message;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
