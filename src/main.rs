@@ -48,6 +48,12 @@ async fn main() -> Result<()> {
     info!("  Database: {:?}", config.storage.db_path);
     info!("  Network listen: {}", config.network.listen_addr);
     info!("  API listen: {}", config.api.listen_addr);
+    if !config.network.bootstrap_nodes.is_empty() {
+        info!("  Bootstrap nodes: {} node(s)", config.network.bootstrap_nodes.len());
+        for (i, addr) in config.network.bootstrap_nodes.iter().enumerate() {
+            info!("    {}: {}", i + 1, addr);
+        }
+    }
 
     // Initialize state manager (includes tokenomics and economy)
     let state_manager = Arc::new(StateManager::new(&config)?);
@@ -129,7 +135,6 @@ async fn main() -> Result<()> {
                         if let Err(e) = consensus_for_blocks.process_block(&block) {
                             error!("Failed to process block: {}", e);
                         }
-                        // Note: Block broadcasting will be handled by network layer when it receives blocks
                     }
                     Err(e) => {
                         error!("Failed to create block: {}", e);

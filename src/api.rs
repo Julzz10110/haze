@@ -192,8 +192,18 @@ async fn send_transaction(
     let tx = request.transaction;
     let tx_hash = tx.hash();
     
-    match api_state.consensus.add_transaction(tx) {
+    match api_state.consensus.add_transaction(tx.clone()) {
         Ok(()) => {
+            // Broadcast transaction to network (async, don't wait)
+            let consensus_clone = api_state.consensus.clone();
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                // Get network reference from consensus if available
+                // For now, transactions will be broadcast when blocks are created
+                // In future, we can add direct transaction broadcasting here
+                tracing::debug!("Transaction added to pool, will be broadcast with next block");
+            });
+            
             let response = TransactionResponse {
                 hash: hex::encode(tx_hash),
                 status: "pending".to_string(),

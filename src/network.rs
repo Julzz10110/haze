@@ -271,11 +271,13 @@ impl Network {
             .map_err(|e| HazeError::Network(format!("Invalid listen address: {}", e)))?;
 
         // Create network instance
+        // Note: we clone `config` here so we can still use the original
+        // value below to read `bootstrap_nodes` without borrowing a moved value.
         let mut network = Self {
             swarm,
             event_sender,
             event_receiver,
-            config,
+            config: config.clone(),
             consensus,
             connected_peers: HashSet::new(),
         };
@@ -283,6 +285,25 @@ impl Network {
         // Start listening
         network.swarm.listen_on(listen_addr)
             .map_err(|e| HazeError::Network(format!("Failed to start listening: {}", e)))?;
+
+        // Connect to bootstrap nodes if configured
+        if !config.network.bootstrap_nodes.is_empty() {
+            tracing::info!("Connecting to {} bootstrap node(s)...", config.network.bootstrap_nodes.len());
+            for bootstrap_addr_str in &config.network.bootstrap_nodes {
+                match bootstrap_addr_str.parse::<Multiaddr>() {
+                    Ok(addr) => {
+                        if let Err(e) = network.swarm.dial(addr) {
+                            tracing::warn!("Failed to dial bootstrap node {}: {}", bootstrap_addr_str, e);
+                        } else {
+                            tracing::info!("Dialing bootstrap node: {}", bootstrap_addr_str);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Invalid bootstrap address {}: {}", bootstrap_addr_str, e);
+                    }
+                }
+            }
+        }
 
         tracing::info!("Network layer initialized successfully");
         Ok(network)
@@ -370,30 +391,68 @@ impl Network {
                     libp2p::request_response::Message::Request { request, channel, .. } => {
                         match request {
                             HazeRequest::Block(block) => {
-                                tracing::debug!("Received block request: height = {}", block.header.height);
+                                let block_height = block.header.height;
+                                let block_hash = hex::encode(block.header.hash);
+                                tracing::info!("Received block from peer: height={}, hash={}", 
+                                    block_height, &block_hash[..16]);
+                                
                                 // Forward to consensus engine
-                                if let Err(e) = self.consensus.process_block(&block) {
-                                    tracing::warn!("Failed to process block: {}", e);
+                                match self.consensus.process_block(&block) {
+                                    Ok(()) => {
+                                        tracing::info!("Block processed successfully: height={}", block_height);
+                                        // Send acknowledgment
+                                        let _ = self.swarm.behaviour_mut().blocks.send_response(
+                                            channel,
+                                            HazeResponse::BlockAck,
+                                        );
+                                        let _ = self.event_sender.send(NetworkEvent::BlockReceived(block.clone()));
+                                        
+                                        // Broadcast to other peers (gossip protocol)
+                                        let block_for_broadcast = block.clone();
+                                        let peers_to_broadcast: Vec<_> = self.connected_peers.iter().collect();
+                                        if !peers_to_broadcast.is_empty() {
+                                            tracing::debug!("Broadcasting block to {} peer(s)", peers_to_broadcast.len());
+                                            for peer_id in peers_to_broadcast {
+                                                let request = HazeRequest::Block(block_for_broadcast.clone());
+                                                let _ = self.swarm.behaviour_mut().blocks.send_request(peer_id, request);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to process block: {}", e);
+                                        // Send error response
+                                        let _ = self.swarm.behaviour_mut().blocks.send_response(
+                                            channel,
+                                            HazeResponse::Error(format!("Failed to process block: {}", e)),
+                                        );
+                                    }
                                 }
-                                // Send acknowledgment
-                                let _ = self.swarm.behaviour_mut().blocks.send_response(
-                                    channel,
-                                    HazeResponse::BlockAck,
-                                );
-                                let _ = self.event_sender.send(NetworkEvent::BlockReceived(block));
                             }
                             HazeRequest::Transaction(tx) => {
-                                tracing::debug!("Received transaction request");
+                                let tx_hash = hex::encode(tx.hash());
+                                tracing::debug!("Received transaction from peer: {}", &tx_hash[..16]);
+                                
                                 // Forward to consensus engine
                                 match self.consensus.add_transaction(tx.clone()) {
                                     Ok(()) => {
-                                        tracing::info!("Transaction added to pool: {}", hex::encode(tx.hash()));
+                                        tracing::info!("Transaction added to pool: {}", &tx_hash[..16]);
                                         // Send acknowledgment
                                         let _ = self.swarm.behaviour_mut().transactions.send_response(
                                             channel,
                                             HazeResponse::TransactionAck,
                                         );
-                                        let _ = self.event_sender.send(NetworkEvent::TransactionReceived(tx));
+                                        let _ = self.event_sender.send(NetworkEvent::TransactionReceived(tx.clone()));
+                                        
+                                        // Broadcast to other peers (gossip protocol)
+                                        let tx_for_broadcast = tx.clone();
+                                        let peers_to_broadcast: Vec<_> = self.connected_peers.iter().collect();
+                                        if !peers_to_broadcast.is_empty() {
+                                            tracing::debug!("Broadcasting transaction to {} peer(s)", peers_to_broadcast.len());
+                                            for peer_id in peers_to_broadcast {
+                                                let request = HazeRequest::Transaction(tx_for_broadcast.clone());
+                                                let _ = self.swarm.behaviour_mut().transactions.send_request(peer_id, request);
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::warn!("Failed to add transaction: {}", e);
@@ -427,10 +486,12 @@ impl Network {
                     libp2p::request_response::Message::Request { request, channel, .. } => {
                         match request {
                             HazeRequest::Block(block) => {
-                                tracing::debug!("Received block request via transactions protocol");
+                                // Blocks should be handled by blocks protocol, but handle here too for compatibility
+                                let block_height = block.header.height;
+                                tracing::debug!("Received block via transactions protocol: height={}", block_height);
                                 match self.consensus.process_block(&block) {
                                     Ok(()) => {
-                                        tracing::info!("Block processed: height={}", block.header.height);
+                                        tracing::info!("Block processed: height={}", block_height);
                                         let _ = self.swarm.behaviour_mut().transactions.send_response(
                                             channel,
                                             HazeResponse::BlockAck,
@@ -447,15 +508,26 @@ impl Network {
                                 }
                             }
                             HazeRequest::Transaction(tx) => {
-                                tracing::debug!("Received transaction request");
+                                let tx_hash = hex::encode(tx.hash());
+                                tracing::debug!("Received transaction via transactions protocol: {}", &tx_hash[..16]);
                                 match self.consensus.add_transaction(tx.clone()) {
                                     Ok(()) => {
-                                        tracing::info!("Transaction added to pool: {}", hex::encode(tx.hash()));
+                                        tracing::info!("Transaction added to pool: {}", &tx_hash[..16]);
                                         let _ = self.swarm.behaviour_mut().transactions.send_response(
                                             channel,
                                             HazeResponse::TransactionAck,
                                         );
-                                        let _ = self.event_sender.send(NetworkEvent::TransactionReceived(tx));
+                                        let _ = self.event_sender.send(NetworkEvent::TransactionReceived(tx.clone()));
+                                        
+                                        // Broadcast to other peers
+                                        let tx_for_broadcast = tx.clone();
+                                        let peers_to_broadcast: Vec<_> = self.connected_peers.iter().collect();
+                                        if !peers_to_broadcast.is_empty() {
+                                            for peer_id in peers_to_broadcast {
+                                                let request = HazeRequest::Transaction(tx_for_broadcast.clone());
+                                                let _ = self.swarm.behaviour_mut().transactions.send_request(peer_id, request);
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::warn!("Failed to add transaction: {}", e);

@@ -736,6 +736,16 @@ impl ConsensusEngine {
     /// Process block (add to DAG)
     pub fn process_block(&self, block: &Block) -> Result<()> {
         let block_hash = block.header.hash;
+        let block_height = block.header.height;
+        
+        // Check if block already exists
+        {
+            let dag = self.dag.read();
+            if dag.vertices.contains_key(&block_hash) {
+                tracing::debug!("Block {} already processed, skipping", hex::encode(block_hash));
+                return Ok(());
+            }
+        }
         
         // Validate DAG references exist
         self.validate_dag_references(block)?;
@@ -775,11 +785,17 @@ impl ConsensusEngine {
             wave.blocks.insert(block_hash);
         }
 
-        // Apply to state (handle errors gracefully for DAG operations)
-        // Note: In production, state application should always succeed
-        if let Err(e) = self.state.apply_block(block) {
-            tracing::warn!("Failed to apply block to state in DAG: {}", e);
-            // Continue with DAG processing even if state application fails
+        // Apply to state
+        // Note: In multi-node setup, we need to ensure state consistency
+        match self.state.apply_block(block) {
+            Ok(()) => {
+                tracing::info!("Block applied to state: height={}, hash={}", 
+                    block_height, hex::encode(block_hash));
+            }
+            Err(e) => {
+                tracing::error!("Failed to apply block to state: {}", e);
+                return Err(e);
+            }
         }
         
         // Mark as processed
@@ -788,6 +804,14 @@ impl ConsensusEngine {
             if let Some(vertex) = dag.vertices.get_mut(&block_hash) {
                 vertex.processed = true;
             }
+        }
+        
+        // Verify state consistency after applying block
+        let state_root = self.state.compute_state_root();
+        if state_root != block.header.state_root {
+            tracing::warn!("State root mismatch after applying block: expected {}, got {}", 
+                hex::encode(block.header.state_root), hex::encode(state_root));
+            // For MVP, we'll log but continue - in production this should be an error
         }
 
         Ok(())
