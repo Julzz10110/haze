@@ -130,6 +130,7 @@ pub fn create_router(state: ApiState) -> Router {
     let router = Router::new()
         .route("/health", get(health_check))
         .route("/api/v1/blockchain/info", get(get_blockchain_info))
+        .route("/api/v1/metrics/basic", get(get_basic_metrics))
         .route("/api/v1/transactions", post(send_transaction))
         .route("/api/v1/transactions/:hash", get(get_transaction))
         .route("/api/v1/blocks/:hash", get(get_block_by_hash))
@@ -901,6 +902,17 @@ pub struct SyncStatus {
     pub syncing: bool,
 }
 
+/// Basic metrics response
+#[derive(Debug, Serialize)]
+pub struct BasicMetrics {
+    pub current_height: u64,
+    pub last_finalized_height: u64,
+    pub last_finalized_wave: u64,
+    pub tx_pool_size: usize,
+    pub connected_peers: usize, // MVP: always 0, network not accessible from API
+    pub block_time_avg_ms: Option<u64>, // Average block time in ms (if available)
+}
+
 /// Start sync with peers
 async fn start_sync(
     State(_api_state): State<ApiState>,
@@ -927,6 +939,55 @@ async fn get_sync_status(
     };
     
     Ok(Json(ApiResponse::success(status)))
+}
+
+/// Get basic metrics for observability
+async fn get_basic_metrics(
+    State(api_state): State<ApiState>,
+) -> ApiResult<Json<ApiResponse<BasicMetrics>>> {
+    let current_height = api_state.state.current_height();
+    let last_finalized_height = api_state.consensus.get_last_finalized_height();
+    let last_finalized_wave = api_state.consensus.get_last_finalized_wave();
+    let tx_pool_size = api_state.consensus.tx_pool_size();
+    
+    // MVP: peer count not accessible from API state (network is separate)
+    // In future, we could add a channel or shared state to expose this
+    let connected_peers = 0;
+    
+    // Calculate average block time from recent blocks (last 10 blocks)
+    let block_time_avg_ms = if current_height > 0 {
+        let mut timestamps = Vec::new();
+        let start_height = current_height.saturating_sub(10);
+        for h in start_height..=current_height {
+            if let Some(block) = api_state.state.get_block_by_height(h) {
+                timestamps.push(block.header.timestamp);
+            }
+        }
+        if timestamps.len() >= 2 {
+            let total_time = timestamps.last().unwrap() - timestamps.first().unwrap();
+            let block_count = timestamps.len() - 1;
+            if block_count > 0 {
+                Some((total_time as u64 * 1000) / block_count as u64) // Convert to ms
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    
+    let metrics = BasicMetrics {
+        current_height,
+        last_finalized_height,
+        last_finalized_wave,
+        tx_pool_size,
+        connected_peers,
+        block_time_avg_ms,
+    };
+    
+    Ok(Json(ApiResponse::success(metrics)))
 }
 
 /// Start API server

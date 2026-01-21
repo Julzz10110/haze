@@ -178,6 +178,9 @@ export interface BlockchainInfo {
   current_height: number;
   total_supply: bigint;
   current_wave: number;
+  state_root: string;
+  last_finalized_height: number;
+  last_finalized_wave: number;
 }
 
 /**

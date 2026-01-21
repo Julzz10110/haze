@@ -120,20 +120,32 @@ async fn main() -> Result<()> {
             let tx_pool_size = consensus_for_blocks.tx_pool_size();
             
             if tx_pool_size > 0 {
+                let block_start_time = std::time::Instant::now();
                 tracing::info!("Creating block with {} transactions from pool", tx_pool_size);
                 
                 // Create block
                 match consensus_for_blocks.create_block(validator_addr) {
                     Ok(block) => {
+                        let block_creation_time = block_start_time.elapsed();
                         let block_hash = hex::encode(block.header.hash);
-                        tracing::info!("Block created: height={}, hash={}, txs={}", 
-                            block.header.height, 
+                        let height = block.header.height;
+                        let tx_count = block.transactions.len();
+                        
+                        tracing::info!("Block created: height={}, hash={}, txs={}, creation_time={}ms", 
+                            height, 
                             &block_hash[..16],
-                            block.transactions.len());
+                            tx_count,
+                            block_creation_time.as_millis());
                         
                         // Process block (add to DAG and apply to state)
+                        let process_start = std::time::Instant::now();
                         if let Err(e) = consensus_for_blocks.process_block(&block) {
                             error!("Failed to process block: {}", e);
+                        } else {
+                            let process_time = process_start.elapsed();
+                            let total_time = block_start_time.elapsed();
+                            tracing::info!("Block processed: height={}, process_time={}ms, total_time={}ms", 
+                                height, process_time.as_millis(), total_time.as_millis());
                         }
                     }
                     Err(e) => {
@@ -143,6 +155,54 @@ async fn main() -> Result<()> {
             } else {
                 tracing::debug!("No transactions in pool, skipping block creation");
             }
+        }
+    });
+    
+    // Start periodic metrics logging task
+    let consensus_for_metrics = consensus.clone();
+    let state_for_metrics = state_manager.clone();
+    let metrics_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30)); // Log metrics every 30 seconds
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        
+        loop {
+            interval.tick().await;
+            
+            let height = state_for_metrics.current_height();
+            let finalized_height = consensus_for_metrics.get_last_finalized_height();
+            let finalized_wave = consensus_for_metrics.get_last_finalized_wave();
+            let tx_pool_size = consensus_for_metrics.tx_pool_size();
+            
+            // Calculate tx/sec from recent blocks (last 10 blocks)
+            let tx_per_sec = if height > 0 {
+                let mut total_txs = 0u64;
+                let mut block_count = 0u64;
+                let start_height = height.saturating_sub(10);
+                for h in start_height..=height {
+                    if let Some(block) = state_for_metrics.get_block_by_height(h) {
+                        total_txs += block.transactions.len() as u64;
+                        block_count += 1;
+                    }
+                }
+                if block_count > 0 {
+                    // Estimate: assume ~5 second block time for MVP
+                    let estimated_seconds = block_count * 5;
+                    if estimated_seconds > 0 {
+                        (total_txs * 1000) / estimated_seconds / 1000 // tx/sec (rough estimate)
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            
+            tracing::info!(
+                "Metrics: height={}, finalized_height={}, finalized_wave={}, tx_pool={}, tx_per_sec_est={}",
+                height, finalized_height, finalized_wave, tx_pool_size, tx_per_sec
+            );
         }
     });
     
@@ -165,6 +225,7 @@ async fn main() -> Result<()> {
     info!("Shutting down HAZE node...");
     
     block_production_handle.abort();
+    metrics_handle.abort();
     network_handle.abort();
     api_handle.abort();
 
