@@ -71,6 +71,14 @@ pub struct ConsensusConfig {
     
     /// Maximum transactions per block
     pub max_transactions_per_block: usize,
+    
+    /// Enable strict block validation (hash/height/parent checks)
+    pub strict_block_validation: bool,
+    
+    /// Maximum allowed future block height delta before rejecting
+    /// (relative to current local height). Used only when
+    /// `strict_block_validation` is enabled.
+    pub max_future_block_height_delta: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +148,8 @@ impl Config {
                 wave_finalization_threshold: 200,
                 golden_wave_threshold: 500,
                 max_transactions_per_block: 10000,
+                strict_block_validation: false,
+                max_future_block_height_delta: 2,
             },
             vm: VMConfig {
                 wasm_cache_size: 512,

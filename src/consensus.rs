@@ -31,6 +31,9 @@ pub struct ConsensusEngine {
     // Wave finalization
     waves: Arc<RwLock<HashMap<u64, Wave>>>,
     current_wave: Arc<RwLock<u64>>,
+    // Last finalized wave and height (checkpointing)
+    last_finalized_wave: Arc<RwLock<u64>>,
+    last_finalized_height: Arc<RwLock<u64>>,
     
     // Transaction pool
     tx_pool: Arc<DashMap<Hash, Transaction>>,
@@ -85,6 +88,8 @@ impl ConsensusEngine {
             waves: Arc::new(RwLock::new(HashMap::new())),
             current_wave: Arc::new(RwLock::new(0)),
             tx_pool: Arc::new(DashMap::new()),
+            last_finalized_wave: Arc::new(RwLock::new(0)),
+            last_finalized_height: Arc::new(RwLock::new(0)),
         };
 
         // Initialize first committee
@@ -192,6 +197,21 @@ impl ConsensusEngine {
     /// Get current wave number (read access)
     pub fn get_current_wave(&self) -> u64 {
         *self.current_wave.read()
+    }
+
+    /// Get reference to state manager (for networking/sync)
+    pub fn state(&self) -> Arc<StateManager> {
+        self.state.clone()
+    }
+
+    /// Get last finalized wave number (checkpoint)
+    pub fn get_last_finalized_wave(&self) -> u64 {
+        *self.last_finalized_wave.read()
+    }
+
+    /// Get last finalized block height (checkpoint)
+    pub fn get_last_finalized_height(&self) -> u64 {
+        *self.last_finalized_height.read()
     }
 
     /// Validate transaction
@@ -747,6 +767,43 @@ impl ConsensusEngine {
             }
         }
         
+        // Optional strict validation, controlled via config
+        if self.config.consensus.strict_block_validation {
+            let current_height = self.state.current_height();
+            
+            // Reject blocks that are too far in the future
+            if block_height > current_height + self.config.consensus.max_future_block_height_delta {
+                return Err(crate::error::HazeError::InvalidBlock(
+                    format!(
+                        "Block height {} is too far ahead of current height {} (max delta {})",
+                        block_height,
+                        current_height,
+                        self.config.consensus.max_future_block_height_delta
+                    )
+                ));
+            }
+            
+            // Validate parent hash if not genesis
+            if block_height > 0 && block.header.parent_hash != [0u8; 32] {
+                // Parent must exist either in DAG or in state
+                let dag = self.dag.read();
+                let parent_known_in_dag = dag.vertices.contains_key(&block.header.parent_hash);
+                drop(dag);
+                
+                let parent_known_in_state = self.state.get_block(&block.header.parent_hash).is_some();
+                
+                if !parent_known_in_dag && !parent_known_in_state {
+                    return Err(crate::error::HazeError::InvalidBlock(
+                        format!(
+                            "Unknown parent for block at height {}: {}",
+                            block_height,
+                            hex::encode(block.header.parent_hash)
+                        )
+                    ));
+                }
+            }
+        }
+        
         // Validate DAG references exist
         self.validate_dag_references(block)?;
         
@@ -814,6 +871,12 @@ impl ConsensusEngine {
             // For MVP, we'll log but continue - in production this should be an error
         }
 
+        // Automatic wave finalization & checkpointing
+        let wave_num = block.header.wave_number;
+        if self.check_wave_finalization(wave_num)? {
+            self.finalize_wave(wave_num)?;
+        }
+
         Ok(())
     }
     
@@ -858,8 +921,40 @@ impl ConsensusEngine {
     pub fn finalize_wave(&self, wave_num: u64) -> Result<()> {
         let mut waves = self.waves.write();
         if let Some(wave) = waves.get_mut(&wave_num) {
+            if wave.finalized {
+                // Already finalized, nothing to do
+                return Ok(());
+            }
             wave.finalized = true;
             tracing::info!("Wave {} finalized with {} blocks", wave_num, wave.blocks.len());
+
+            // Compute checkpoint height: max block height in this wave
+            let dag = self.dag.read();
+            let mut max_height: u64 = 0;
+            for hash in &wave.blocks {
+                if let Some(vertex) = dag.vertices.get(hash) {
+                    let h = vertex.block.header.height;
+                    if h > max_height {
+                        max_height = h;
+                    }
+                }
+            }
+            drop(dag);
+
+            // Update checkpoint fields
+            {
+                let mut last_wave = self.last_finalized_wave.write();
+                let mut last_height = self.last_finalized_height.write();
+                if wave_num > *last_wave || max_height > *last_height {
+                    *last_wave = wave_num;
+                    *last_height = max_height;
+                    tracing::info!(
+                        "Checkpoint updated: last_finalized_wave={}, last_finalized_height={}",
+                        *last_wave,
+                        *last_height
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1047,6 +1142,8 @@ impl Clone for ConsensusEngine {
             waves: self.waves.clone(),
             current_wave: self.current_wave.clone(),
             tx_pool: self.tx_pool.clone(),
+            last_finalized_wave: self.last_finalized_wave.clone(),
+            last_finalized_height: self.last_finalized_height.clone(),
         }
     }
 }

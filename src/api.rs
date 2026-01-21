@@ -145,6 +145,8 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/api/v1/economy/pools", post(create_liquidity_pool))
         .route("/api/v1/economy/pools/:pool_id", get(get_liquidity_pool))
         .route("/api/v1/ws", get(ws_handler))
+        .route("/api/v1/sync/start", post(start_sync))
+        .route("/api/v1/sync/status", get(get_sync_status))
         .with_state(state);
     
     // Add CORS if enabled
@@ -881,6 +883,43 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: ApiState) {
 /// Broadcast asset event to all WebSocket clients
 pub fn broadcast_asset_event(tx: &broadcast::Sender<WsEvent>, event: WsEvent) {
     let _ = tx.send(event);
+}
+
+/// Sync status response
+#[derive(Debug, Serialize)]
+pub struct SyncStatus {
+    pub current_height: u64,
+    pub last_finalized_height: u64,
+    pub last_finalized_wave: u64,
+    pub syncing: bool,
+}
+
+/// Start sync with peers
+async fn start_sync(
+    State(api_state): State<ApiState>,
+) -> ApiResult<Json<ApiResponse<&'static str>>> {
+    // For MVP: sync is automatic when blocks are received
+    // This endpoint is a placeholder for future manual sync control
+    tracing::info!("Sync start requested (automatic sync is enabled)");
+    Ok(Json(ApiResponse::success("Sync is automatic")))
+}
+
+/// Get sync status
+async fn get_sync_status(
+    State(api_state): State<ApiState>,
+) -> ApiResult<Json<ApiResponse<SyncStatus>>> {
+    let current_height = api_state.state.current_height();
+    let last_finalized_height = api_state.consensus.get_last_finalized_height();
+    let last_finalized_wave = api_state.consensus.get_last_finalized_wave();
+    
+    let status = SyncStatus {
+        current_height,
+        last_finalized_height,
+        last_finalized_wave,
+        syncing: false, // MVP: always false, sync is automatic
+    };
+    
+    Ok(Json(ApiResponse::success(status)))
 }
 
 /// Start API server

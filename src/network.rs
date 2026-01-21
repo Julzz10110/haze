@@ -26,7 +26,7 @@ use libp2p_request_response::{
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::error::{HazeError, Result as HazeResult};
-use crate::types::{Block, Transaction};
+use crate::types::{Block, Transaction, Hash};
 use hex;
 
 /// Network event
@@ -48,6 +48,10 @@ const TRANSACTIONS_PROTOCOL_NAME: &[u8] = b"/haze/transactions/1.0.0";
 pub enum HazeRequest {
     Block(Block),
     Transaction(Transaction),
+    /// Request blocks by height range (for sync)
+    RequestBlocksByHeight { start_height: u64, end_height: u64 },
+    /// Request block by hash (for sync)
+    RequestBlockByHash(Hash),
 }
 
 /// Response types for request-response protocol
@@ -55,6 +59,10 @@ pub enum HazeRequest {
 pub enum HazeResponse {
     BlockAck,
     TransactionAck,
+    /// Response with blocks for sync
+    Blocks(Vec<Block>),
+    /// Response with single block
+    Block(Block),
     Error(String),
 }
 
@@ -101,9 +109,41 @@ impl RequestResponseCodec for HazeCodec {
         // Deserialize based on protocol
         let protocol_str = String::from_utf8_lossy(&self.protocol);
         if protocol_str.as_ref() == String::from_utf8_lossy(BLOCKS_PROTOCOL_NAME).as_ref() {
-            let block: Block = bincode::deserialize(&buffer)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            Ok(HazeRequest::Block(block))
+            // Try to deserialize as Block first (for backward compatibility)
+            if let Ok(block) = bincode::deserialize::<Block>(&buffer) {
+                Ok(HazeRequest::Block(block))
+            } else {
+                // Try sync request format: first byte is request type
+                if buffer.is_empty() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Empty request"));
+                }
+                match buffer[0] {
+                    1 => {
+                        // RequestBlocksByHeight: (1u8, start_height: u64, end_height: u64)
+                        if buffer.len() >= 17 {
+                            let start_height = u64::from_le_bytes(buffer[1..9].try_into().unwrap());
+                            let end_height = u64::from_le_bytes(buffer[9..17].try_into().unwrap());
+                            Ok(HazeRequest::RequestBlocksByHeight { start_height, end_height })
+                        } else {
+                            Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid RequestBlocksByHeight format"))
+                        }
+                    }
+                    2 => {
+                        // RequestBlockByHash: (2u8, hash: [u8; 32])
+                        if buffer.len() >= 33 {
+                            let mut hash = [0u8; 32];
+                            hash.copy_from_slice(&buffer[1..33]);
+                            Ok(HazeRequest::RequestBlockByHash(hash))
+                        } else {
+                            Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid RequestBlockByHash format"))
+                        }
+                    }
+                    _ => {
+                        // Fallback: try Block again
+                        Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Unknown request type"))
+                    }
+                }
+            }
         } else if protocol_str.as_ref() == String::from_utf8_lossy(TRANSACTIONS_PROTOCOL_NAME).as_ref() {
             let tx: Transaction = bincode::deserialize(&buffer)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -147,6 +187,19 @@ impl RequestResponseCodec for HazeCodec {
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
             HazeRequest::Transaction(tx) => bincode::serialize(&tx)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+            HazeRequest::RequestBlocksByHeight { start_height, end_height } => {
+                // Serialize as (1u8, start_height: u64, end_height: u64)
+                let mut data = vec![1u8];
+                data.extend_from_slice(&start_height.to_le_bytes());
+                data.extend_from_slice(&end_height.to_le_bytes());
+                data
+            }
+            HazeRequest::RequestBlockByHash(hash) => {
+                // Serialize as (2u8, hash: [u8; 32])
+                let mut data = vec![2u8];
+                data.extend_from_slice(&hash);
+                data
+            }
         };
         
         // Write length prefix
@@ -464,6 +517,74 @@ impl Network {
                                     }
                                 }
                             }
+                            HazeRequest::RequestBlocksByHeight { start_height, end_height } => {
+                                tracing::info!("Sync request: blocks from height {} to {}", start_height, end_height);
+                                
+                                // Get blocks from state
+                                let mut blocks = Vec::new();
+                                let state = self.consensus.state();
+                                for height in start_height..=end_height.min(state.current_height()) {
+                                    if let Some(block) = state.get_block_by_height(height) {
+                                        blocks.push(block);
+                                    }
+                                }
+                                
+                                tracing::info!("Sending {} blocks for sync (heights {}-{})", blocks.len(), start_height, end_height);
+                                let _ = self.swarm.behaviour_mut().blocks.send_response(
+                                    channel,
+                                    HazeResponse::Blocks(blocks),
+                                );
+                            }
+                            HazeRequest::RequestBlockByHash(hash) => {
+                                tracing::debug!("Sync request: block by hash {}", hex::encode(hash));
+                                
+                                let state = self.consensus.state();
+                                if let Some(block) = state.get_block(&hash) {
+                                    let _ = self.swarm.behaviour_mut().blocks.send_response(
+                                        channel,
+                                        HazeResponse::Block(block),
+                                    );
+                                } else {
+                                    let _ = self.swarm.behaviour_mut().blocks.send_response(
+                                        channel,
+                                        HazeResponse::Error("Block not found".to_string()),
+                                    );
+                                }
+                            }
+                            HazeRequest::RequestBlocksByHeight { start_height, end_height } => {
+                                tracing::info!("Sync request: blocks from height {} to {}", start_height, end_height);
+                                
+                                // Get blocks from state
+                                let mut blocks = Vec::new();
+                                let state = self.consensus.state();
+                                for height in start_height..=end_height.min(state.current_height()) {
+                                    if let Some(block) = state.get_block_by_height(height) {
+                                        blocks.push(block);
+                                    }
+                                }
+                                
+                                tracing::info!("Sending {} blocks for sync (heights {}-{})", blocks.len(), start_height, end_height);
+                                let _ = self.swarm.behaviour_mut().blocks.send_response(
+                                    channel,
+                                    HazeResponse::Blocks(blocks),
+                                );
+                            }
+                            HazeRequest::RequestBlockByHash(hash) => {
+                                tracing::debug!("Sync request: block by hash {}", hex::encode(hash));
+                                
+                                let state = self.consensus.state();
+                                if let Some(block) = state.get_block(&hash) {
+                                    let _ = self.swarm.behaviour_mut().blocks.send_response(
+                                        channel,
+                                        HazeResponse::Block(block),
+                                    );
+                                } else {
+                                    let _ = self.swarm.behaviour_mut().blocks.send_response(
+                                        channel,
+                                        HazeResponse::Error("Block not found".to_string()),
+                                    );
+                                }
+                            }
                         }
                     }
                     libp2p::request_response::Message::Response { response, .. } => {
@@ -473,6 +594,21 @@ impl Network {
                             }
                             HazeResponse::TransactionAck => {
                                 tracing::debug!("Received transaction acknowledgment");
+                            }
+                            HazeResponse::Blocks(blocks) => {
+                                tracing::info!("Received {} blocks for sync", blocks.len());
+                                // Process received blocks
+                                for block in blocks {
+                                    if let Err(e) = self.consensus.process_block(&block) {
+                                        tracing::warn!("Failed to process synced block: {}", e);
+                                    }
+                                }
+                            }
+                            HazeResponse::Block(block) => {
+                                tracing::info!("Received single block for sync: height={}", block.header.height);
+                                if let Err(e) = self.consensus.process_block(&block) {
+                                    tracing::warn!("Failed to process synced block: {}", e);
+                                }
                             }
                             HazeResponse::Error(msg) => {
                                 tracing::warn!("Received error response: {}", msg);
@@ -538,6 +674,10 @@ impl Network {
                                     }
                                 }
                             }
+                            // Sync-related requests should not arrive on transactions protocol; ignore
+                            HazeRequest::RequestBlocksByHeight { .. } | HazeRequest::RequestBlockByHash(_) => {
+                                tracing::warn!("Received sync request on transactions protocol; ignoring");
+                            }
                         }
                     }
                     libp2p::request_response::Message::Response { response, .. } => {
@@ -547,6 +687,10 @@ impl Network {
                             }
                             HazeResponse::TransactionAck => {
                                 tracing::debug!("Received transaction acknowledgment");
+                            }
+                            // Sync-related responses should not arrive on transactions protocol; ignore
+                            HazeResponse::Blocks(_) | HazeResponse::Block(_) => {
+                                tracing::warn!("Received sync response on transactions protocol; ignoring");
                             }
                             HazeResponse::Error(msg) => {
                                 tracing::warn!("Received error response: {}", msg);
@@ -656,6 +800,38 @@ impl Network {
     /// Get swarm reference for advanced operations
     pub fn swarm_mut(&mut self) -> &mut Swarm<HazeBehaviour> {
         &mut self.swarm
+    }
+    
+    /// Request blocks by height range from a peer (for sync)
+    pub fn request_blocks_by_height(&mut self, peer_id: &PeerId, start_height: u64, end_height: u64) -> HazeResult<()> {
+        let request = HazeRequest::RequestBlocksByHeight { start_height, end_height };
+        let _request_id = self.swarm.behaviour_mut().blocks.send_request(peer_id, request);
+        tracing::info!("Requested blocks {}-{} from peer {}", start_height, end_height, peer_id);
+        Ok(())
+    }
+    
+    /// Request block by hash from a peer (for sync)
+    pub fn request_block_by_hash(&mut self, peer_id: &PeerId, hash: Hash) -> HazeResult<()> {
+        let request = HazeRequest::RequestBlockByHash(hash);
+        let _request_id = self.swarm.behaviour_mut().blocks.send_request(peer_id, request);
+        tracing::debug!("Requested block {} from peer {}", hex::encode(hash), peer_id);
+        Ok(())
+    }
+    
+    /// Sync with peer: request missing blocks up to a fixed window ahead
+    pub async fn sync_with_peer(&mut self, peer_id: &PeerId) -> HazeResult<()> {
+        let state = self.consensus.state();
+        let current_height = state.current_height();
+        
+        // For MVP: request next 100 blocks ahead of current height
+        const BATCH_SIZE: u64 = 100;
+        let start_height = current_height + 1;
+        let end_height = start_height + BATCH_SIZE - 1;
+        
+        tracing::info!("Starting sync with peer {}: requesting blocks {}-{}", peer_id, start_height, end_height);
+        self.request_blocks_by_height(peer_id, start_height, end_height)?;
+        
+        Ok(())
     }
 }
 
