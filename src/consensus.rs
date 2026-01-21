@@ -1018,7 +1018,7 @@ impl ConsensusEngine {
         for hash in dag.vertices.keys() {
             in_degree.insert(*hash, 0);
         }
-        for (hash, refs) in dag.edges.iter() {
+        for (_, refs) in dag.edges.iter() {
             for ref_hash in refs {
                 if *ref_hash != [0u8; 32] { // Skip genesis
                     *in_degree.entry(*ref_hash).or_insert(0) += 1;
@@ -1106,7 +1106,7 @@ impl ConsensusEngine {
                 if *ref_hash != [0u8; 32] && !dag.vertices.contains_key(ref_hash) {
                     return Err(crate::error::HazeError::InvalidBlock(
                         format!("Edge from {} to non-existent vertex {}", 
-                                hex::encode(hash), hex::encode(ref_hash))
+                                hex::encode(*hash), hex::encode(ref_hash))
                     ));
                 }
             }

@@ -19,7 +19,6 @@ use axum::{
 use axum::extract::ws::Message;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use futures_util::StreamExt;
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
@@ -114,11 +113,14 @@ pub struct BlockInfo {
 }
 
 /// Blockchain info response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct BlockchainInfo {
     pub current_height: u64,
     pub total_supply: u64,
     pub current_wave: u64,
+    pub state_root: String, // Hex-encoded state root hash
+    pub last_finalized_height: u64,
+    pub last_finalized_wave: u64,
 }
 
 /// Create API router
@@ -177,10 +179,20 @@ async fn get_blockchain_info(
     // Get current wave from consensus
     let current_wave = api_state.consensus.get_current_wave();
     
+    // Compute state root
+    let state_root = api_state.state.compute_state_root();
+    
+    // Get finalized checkpoint info
+    let last_finalized_height = api_state.consensus.get_last_finalized_height();
+    let last_finalized_wave = api_state.consensus.get_last_finalized_wave();
+    
     let info = BlockchainInfo {
         current_height: height,
         total_supply,
         current_wave,
+        state_root: hex::encode(state_root),
+        last_finalized_height,
+        last_finalized_wave,
     };
     
     Ok(Json(ApiResponse::success(info)))
@@ -197,14 +209,9 @@ async fn send_transaction(
     match api_state.consensus.add_transaction(tx.clone()) {
         Ok(()) => {
             // Broadcast transaction to network (async, don't wait)
-            let consensus_clone = api_state.consensus.clone();
-            let tx_clone = tx.clone();
-            tokio::spawn(async move {
-                // Get network reference from consensus if available
-                // For now, transactions will be broadcast when blocks are created
-                // In future, we can add direct transaction broadcasting here
-                tracing::debug!("Transaction added to pool, will be broadcast with next block");
-            });
+            // For now, transactions will be broadcast when blocks are created
+            // In future, we can add direct transaction broadcasting here
+            tracing::debug!("Transaction added to pool, will be broadcast with next block");
             
             let response = TransactionResponse {
                 hash: hex::encode(tx_hash),
@@ -896,7 +903,7 @@ pub struct SyncStatus {
 
 /// Start sync with peers
 async fn start_sync(
-    State(api_state): State<ApiState>,
+    State(_api_state): State<ApiState>,
 ) -> ApiResult<Json<ApiResponse<&'static str>>> {
     // For MVP: sync is automatic when blocks are received
     // This endpoint is a placeholder for future manual sync control

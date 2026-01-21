@@ -52,6 +52,17 @@ pub enum HazeRequest {
     RequestBlocksByHeight { start_height: u64, end_height: u64 },
     /// Request block by hash (for sync)
     RequestBlockByHash(Hash),
+    /// Request blockchain info (for light sync)
+    RequestBlockchainInfo,
+}
+
+/// Blockchain info for P2P (lightweight version)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PeerBlockchainInfo {
+    pub current_height: u64,
+    pub state_root: Hash,
+    pub last_finalized_height: u64,
+    pub last_finalized_wave: u64,
 }
 
 /// Response types for request-response protocol
@@ -63,6 +74,8 @@ pub enum HazeResponse {
     Blocks(Vec<Block>),
     /// Response with single block
     Block(Block),
+    /// Response with blockchain info (for light sync)
+    BlockchainInfo(PeerBlockchainInfo),
     Error(String),
 }
 
@@ -138,6 +151,10 @@ impl RequestResponseCodec for HazeCodec {
                             Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid RequestBlockByHash format"))
                         }
                     }
+                    3 => {
+                        // RequestBlockchainInfo: (3u8)
+                        Ok(HazeRequest::RequestBlockchainInfo)
+                    }
                     _ => {
                         // Fallback: try Block again
                         Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Unknown request type"))
@@ -199,6 +216,10 @@ impl RequestResponseCodec for HazeCodec {
                 let mut data = vec![2u8];
                 data.extend_from_slice(&hash);
                 data
+            }
+            HazeRequest::RequestBlockchainInfo => {
+                // Serialize as (3u8)
+                vec![3u8]
             }
         };
         
@@ -366,6 +387,10 @@ impl Network {
     pub async fn run(&mut self) -> HazeResult<()> {
         tracing::info!("Network event loop started");
         
+        // Periodic light sync check (every 30 seconds)
+        let mut light_sync_interval = tokio::time::interval(Duration::from_secs(30));
+        light_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        
         loop {
             tokio::select! {
                 event = self.swarm.select_next_some() => {
@@ -377,6 +402,12 @@ impl Network {
                     } else {
                         // Channel closed
                         break;
+                    }
+                }
+                _ = light_sync_interval.tick() => {
+                    // Periodic light sync check
+                    if let Err(e) = self.perform_light_sync().await {
+                        tracing::warn!("Light sync check failed: {}", e);
                     }
                 }
                 _ = tokio::signal::ctrl_c() => {
@@ -551,39 +582,26 @@ impl Network {
                                     );
                                 }
                             }
-                            HazeRequest::RequestBlocksByHeight { start_height, end_height } => {
-                                tracing::info!("Sync request: blocks from height {} to {}", start_height, end_height);
+                            HazeRequest::RequestBlockchainInfo => {
+                                tracing::debug!("Sync request: blockchain info");
                                 
-                                // Get blocks from state
-                                let mut blocks = Vec::new();
                                 let state = self.consensus.state();
-                                for height in start_height..=end_height.min(state.current_height()) {
-                                    if let Some(block) = state.get_block_by_height(height) {
-                                        blocks.push(block);
-                                    }
-                                }
+                                let current_height = state.current_height();
+                                let state_root = state.compute_state_root();
+                                let last_finalized_height = self.consensus.get_last_finalized_height();
+                                let last_finalized_wave = self.consensus.get_last_finalized_wave();
                                 
-                                tracing::info!("Sending {} blocks for sync (heights {}-{})", blocks.len(), start_height, end_height);
+                                let info = PeerBlockchainInfo {
+                                    current_height,
+                                    state_root,
+                                    last_finalized_height,
+                                    last_finalized_wave,
+                                };
+                                
                                 let _ = self.swarm.behaviour_mut().blocks.send_response(
                                     channel,
-                                    HazeResponse::Blocks(blocks),
+                                    HazeResponse::BlockchainInfo(info),
                                 );
-                            }
-                            HazeRequest::RequestBlockByHash(hash) => {
-                                tracing::debug!("Sync request: block by hash {}", hex::encode(hash));
-                                
-                                let state = self.consensus.state();
-                                if let Some(block) = state.get_block(&hash) {
-                                    let _ = self.swarm.behaviour_mut().blocks.send_response(
-                                        channel,
-                                        HazeResponse::Block(block),
-                                    );
-                                } else {
-                                    let _ = self.swarm.behaviour_mut().blocks.send_response(
-                                        channel,
-                                        HazeResponse::Error("Block not found".to_string()),
-                                    );
-                                }
                             }
                         }
                     }
@@ -608,6 +626,52 @@ impl Network {
                                 tracing::info!("Received single block for sync: height={}", block.header.height);
                                 if let Err(e) = self.consensus.process_block(&block) {
                                     tracing::warn!("Failed to process synced block: {}", e);
+                                }
+                            }
+                            HazeResponse::BlockchainInfo(info) => {
+                                tracing::debug!("Received blockchain info: height={}, finalized_height={}, finalized_wave={}", 
+                                    info.current_height, info.last_finalized_height, info.last_finalized_wave);
+                                
+                                // Perform light sync comparison
+                                let state = self.consensus.state();
+                                let local_height = state.current_height();
+                                let local_finalized_height = self.consensus.get_last_finalized_height();
+                                
+                                // Check if peer is ahead
+                                if info.current_height > local_height {
+                                    tracing::info!("Peer is ahead: peer_height={}, local_height={}, requesting sync", 
+                                        info.current_height, local_height);
+                                    // Request missing blocks
+                                    let start_height = local_height + 1;
+                                    let end_height = info.current_height.min(local_height + 100); // Batch size
+                                    // Clone peer_id to avoid borrow checker issues
+                                    if let Some(peer_id) = self.connected_peers.iter().next().cloned() {
+                                        let _ = self.request_blocks_by_height(&peer_id, start_height, end_height);
+                                    }
+                                }
+                                
+                                // Compare state roots at finalized checkpoint
+                                if info.last_finalized_height > 0 && local_finalized_height > 0 {
+                                    // Get state root at finalized height from local state
+                                    if let Some(finalized_block) = state.get_block_by_height(local_finalized_height) {
+                                        let local_checkpoint_state_root = finalized_block.header.state_root;
+                                        
+                                        // If peer's finalized height matches ours, compare state roots
+                                        if info.last_finalized_height == local_finalized_height {
+                                            if info.state_root != local_checkpoint_state_root {
+                                                tracing::warn!("State root mismatch at checkpoint height {}: peer={}, local={}", 
+                                                    local_finalized_height,
+                                                    hex::encode(info.state_root),
+                                                    hex::encode(local_checkpoint_state_root));
+                                                // For MVP: log warning, full fork resolution would be needed
+                                            } else {
+                                                tracing::debug!("State root matches at checkpoint height {}", local_finalized_height);
+                                            }
+                                        } else if info.last_finalized_height < local_finalized_height {
+                                            tracing::debug!("Peer is behind: peer_finalized={}, local_finalized={}", 
+                                                info.last_finalized_height, local_finalized_height);
+                                        }
+                                    }
                                 }
                             }
                             HazeResponse::Error(msg) => {
@@ -675,7 +739,9 @@ impl Network {
                                 }
                             }
                             // Sync-related requests should not arrive on transactions protocol; ignore
-                            HazeRequest::RequestBlocksByHeight { .. } | HazeRequest::RequestBlockByHash(_) => {
+                            HazeRequest::RequestBlocksByHeight { .. } 
+                            | HazeRequest::RequestBlockByHash(_) 
+                            | HazeRequest::RequestBlockchainInfo => {
                                 tracing::warn!("Received sync request on transactions protocol; ignoring");
                             }
                         }
@@ -689,7 +755,9 @@ impl Network {
                                 tracing::debug!("Received transaction acknowledgment");
                             }
                             // Sync-related responses should not arrive on transactions protocol; ignore
-                            HazeResponse::Blocks(_) | HazeResponse::Block(_) => {
+                            HazeResponse::Blocks(_) 
+                            | HazeResponse::Block(_) 
+                            | HazeResponse::BlockchainInfo(_) => {
                                 tracing::warn!("Received sync response on transactions protocol; ignoring");
                             }
                             HazeResponse::Error(msg) => {
@@ -818,6 +886,14 @@ impl Network {
         Ok(())
     }
     
+    /// Request blockchain info from a peer (for light sync)
+    pub fn request_blockchain_info(&mut self, peer_id: &PeerId) -> HazeResult<()> {
+        let request = HazeRequest::RequestBlockchainInfo;
+        let _request_id = self.swarm.behaviour_mut().blocks.send_request(peer_id, request);
+        tracing::debug!("Requested blockchain info from peer {}", peer_id);
+        Ok(())
+    }
+    
     /// Sync with peer: request missing blocks up to a fixed window ahead
     pub async fn sync_with_peer(&mut self, peer_id: &PeerId) -> HazeResult<()> {
         let state = self.consensus.state();
@@ -832,6 +908,28 @@ impl Network {
         self.request_blocks_by_height(peer_id, start_height, end_height)?;
         
         Ok(())
+    }
+    
+    /// Perform light sync: check blockchain info from peers and sync if needed
+    /// Returns true if sync was triggered, false otherwise
+    pub async fn perform_light_sync(&mut self) -> HazeResult<bool> {
+        if self.connected_peers.is_empty() {
+            tracing::debug!("No connected peers for light sync");
+            return Ok(false);
+        }
+        
+        // Request blockchain info from first available peer
+        if let Some(peer_id) = self.connected_peers.iter().next().cloned() {
+            self.request_blockchain_info(&peer_id)?;
+            tracing::debug!("Requested blockchain info for light sync from peer {}", peer_id);
+        }
+        
+        // Note: The actual comparison and sync trigger will happen when we receive
+        // the BlockchainInfo response. For now, we just request the info.
+        // In a full implementation, we would store pending requests and compare
+        // state roots at finalized checkpoints.
+        
+        Ok(false) // Return false for now, sync will be triggered by response handler
     }
 }
 
