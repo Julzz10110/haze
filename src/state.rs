@@ -1,10 +1,11 @@
 //! State management for HAZE blockchain
 
 use std::sync::Arc;
+use std::collections::HashMap;
 use parking_lot::RwLock;
 use sled::Db;
 use tokio::sync::broadcast;
-use crate::types::{Address, Hash, Block, Transaction};
+use crate::types::{Address, Hash, Block, Transaction, AssetAction};
 use crate::config::Config;
 use crate::error::{HazeError, Result};
 use crate::tokenomics::Tokenomics;
@@ -32,12 +33,27 @@ pub struct AccountState {
     pub staked: u64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// History entry for asset (same as in assets.rs but needed here for serialization)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssetHistoryEntry {
+    pub timestamp: i64,
+    pub action: AssetAction,
+    pub changes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AssetState {
     pub owner: Address,
     pub data: crate::types::AssetData,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Blob references for large files (Core density)
+    /// Maps blob key to blob hash
+    #[serde(default)]
+    pub blob_refs: HashMap<String, Hash>,
+    /// History of asset changes (limited to last 100 entries)
+    #[serde(default)]
+    pub history: Vec<AssetHistoryEntry>,
 }
 
 impl StateManager {
@@ -91,6 +107,22 @@ impl StateManager {
         }
     }
 
+    /// Add history entry to asset state (limited to last 100 entries)
+    fn add_asset_history(asset_state: &mut AssetState, action: AssetAction, changes: HashMap<String, String>) {
+        let history_entry = AssetHistoryEntry {
+            timestamp: chrono::Utc::now().timestamp(),
+            action,
+            changes,
+        };
+        
+        asset_state.history.push(history_entry);
+        
+        // Limit history to last 100 entries
+        if asset_state.history.len() > 100 {
+            asset_state.history.remove(0);
+        }
+    }
+
     /// Get account state by address
     ///
     /// # Arguments
@@ -127,6 +159,25 @@ impl StateManager {
     /// `Some(AssetState)` if the asset exists, `None` otherwise.
     pub fn get_asset(&self, asset_id: &Hash) -> Option<AssetState> {
         self.assets.get(asset_id).map(|v| v.clone())
+    }
+
+    /// Get asset history by asset ID
+    ///
+    /// # Arguments
+    /// * `asset_id` - The asset identifier (hash)
+    /// * `limit` - Maximum number of history entries to return (0 = all)
+    ///
+    /// # Returns
+    /// `Some(Vec<AssetHistoryEntry>)` if the asset exists, `None` otherwise.
+    pub fn get_asset_history(&self, asset_id: &Hash, limit: usize) -> Option<Vec<AssetHistoryEntry>> {
+        self.assets.get(asset_id).map(|asset_state| {
+            let history = asset_state.history.clone();
+            if limit > 0 && history.len() > limit {
+                history.into_iter().rev().take(limit).rev().collect()
+            } else {
+                history
+            }
+        })
     }
 
     /// Get block by hash
@@ -229,12 +280,75 @@ impl StateManager {
                             ));
                         }
                         
-                        let asset_state = AssetState {
+                        // Validate metadata size
+                        let metadata_size: usize = data.metadata.values().map(|v| v.len()).sum();
+                        if metadata_size > data.density.max_size() {
+                            return Err(HazeError::AssetSizeExceeded(
+                                metadata_size,
+                                data.density.max_size()
+                            ));
+                        }
+                        
+                        // Validate metadata keys (no empty keys, reasonable length)
+                        for (key, value) in &data.metadata {
+                            if key.is_empty() || key.len() > 256 {
+                                return Err(HazeError::InvalidMetadataFormat(
+                                    format!("Invalid metadata key: '{}'", key)
+                                ));
+                            }
+                            if value.len() > 10 * 1024 * 1024 { // 10MB max per value
+                                return Err(HazeError::InvalidMetadataFormat(
+                                    format!("Metadata value for '{}' exceeds 10MB limit", key)
+                                ));
+                            }
+                        }
+                        
+                        // Parse blob_refs from metadata if present
+                        let mut blob_refs = HashMap::new();
+                        if let Some(blob_refs_json) = data.metadata.get("_blob_refs") {
+                            match serde_json::from_str::<HashMap<String, String>>(blob_refs_json) {
+                                Ok(blob_refs_map) => {
+                                    for (key, hash_hex) in blob_refs_map {
+                                        if let Ok(hash_bytes) = hex::decode(&hash_hex) {
+                                            if hash_bytes.len() == 32 {
+                                                let mut hash = [0u8; 32];
+                                                hash.copy_from_slice(&hash_bytes);
+                                                blob_refs.insert(key, hash);
+                                            } else {
+                                                return Err(HazeError::InvalidMetadataFormat(
+                                                    format!("Invalid blob hash length for key '{}'", key)
+                                                ));
+                                            }
+                                        } else {
+                                            return Err(HazeError::InvalidMetadataFormat(
+                                                format!("Invalid blob hash hex format for key '{}'", key)
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    return Err(HazeError::InvalidMetadataFormat(
+                                        format!("Invalid _blob_refs JSON format: {}", e)
+                                    ));
+                                }
+                            }
+                        }
+                        
+                        let mut asset_state = AssetState {
                             owner: data.owner,
                             data: data.clone(),
                             created_at: chrono::Utc::now().timestamp(),
                             updated_at: chrono::Utc::now().timestamp(),
+                            blob_refs,
+                            history: Vec::new(),
                         };
+                        
+                        // Remove special metadata keys before storing
+                        asset_state.data.metadata.remove("_blob_refs");
+                        
+                        // Add creation to history
+                        Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Create, HashMap::new());
+                        
                         self.assets.insert(*asset_id, asset_state);
                         
                         // Broadcast WebSocket event
@@ -253,7 +367,7 @@ impl StateManager {
                         
                         // Verify ownership
                         if asset_state.owner != data.owner {
-                            return Err(HazeError::InvalidTransaction(
+                            return Err(HazeError::AccessDenied(
                                 "Asset ownership mismatch".to_string()
                             ));
                         }
@@ -261,10 +375,81 @@ impl StateManager {
                         // Save owner before moving asset_state
                         let owner = asset_state.owner;
                         
-                        // Update metadata and attributes
-                        asset_state.data.metadata = data.metadata.clone();
+                        // Validate new metadata size
+                        let current_size: usize = asset_state.data.metadata.values().map(|v| v.len()).sum();
+                        let new_metadata_size: usize = data.metadata.iter()
+                            .filter(|(k, _)| !k.starts_with('_'))
+                            .map(|(_, v)| v.len())
+                            .sum();
+                        
+                        if current_size + new_metadata_size > asset_state.data.density.max_size() {
+                            return Err(HazeError::AssetSizeExceeded(
+                                current_size + new_metadata_size,
+                                asset_state.data.density.max_size()
+                            ));
+                        }
+                        
+                        // Validate metadata keys
+                        for (key, value) in &data.metadata {
+                            if !key.starts_with('_') {
+                                if key.is_empty() || key.len() > 256 {
+                                    return Err(HazeError::InvalidMetadataFormat(
+                                        format!("Invalid metadata key: '{}'", key)
+                                    ));
+                                }
+                                if value.len() > 10 * 1024 * 1024 {
+                                    return Err(HazeError::InvalidMetadataFormat(
+                                        format!("Metadata value for '{}' exceeds 10MB limit", key)
+                                    ));
+                                }
+                            }
+                        }
+                        
+                        // Process blob_refs from metadata if present
+                        if let Some(blob_refs_json) = data.metadata.get("_blob_refs") {
+                            match serde_json::from_str::<HashMap<String, String>>(blob_refs_json) {
+                                Ok(blob_refs_map) => {
+                                    for (key, hash_hex) in blob_refs_map {
+                                        if let Ok(hash_bytes) = hex::decode(&hash_hex) {
+                                            if hash_bytes.len() == 32 {
+                                                let mut hash = [0u8; 32];
+                                                hash.copy_from_slice(&hash_bytes);
+                                                asset_state.blob_refs.insert(key, hash);
+                                            } else {
+                                                return Err(HazeError::InvalidMetadataFormat(
+                                                    format!("Invalid blob hash length for key '{}'", key)
+                                                ));
+                                            }
+                                        } else {
+                                            return Err(HazeError::InvalidMetadataFormat(
+                                                format!("Invalid blob hash hex format for key '{}'", key)
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    return Err(HazeError::InvalidMetadataFormat(
+                                        format!("Invalid _blob_refs JSON format: {}", e)
+                                    ));
+                                }
+                            }
+                        }
+                        
+                        // Update metadata and attributes (excluding special keys)
+                        for (key, value) in &data.metadata {
+                            if !key.starts_with('_') {
+                                asset_state.data.metadata.insert(key.clone(), value.clone());
+                            }
+                        }
                         asset_state.data.attributes = data.attributes.clone();
                         asset_state.updated_at = chrono::Utc::now().timestamp();
+                        
+                        // Record changes in history
+                        let changes: HashMap<String, String> = data.metadata.iter()
+                            .filter(|(k, _)| !k.starts_with('_'))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Update, changes);
                         
                         self.assets.insert(*asset_id, asset_state);
                         
@@ -283,28 +468,93 @@ impl StateManager {
                         
                         // Verify ownership
                         if asset_state.owner != data.owner {
-                            return Err(HazeError::InvalidTransaction(
+                            return Err(HazeError::AccessDenied(
                                 "Asset ownership mismatch".to_string()
                             ));
                         }
                         
-                        // Check if condensation is valid (can only increase density)
+                        // Check if condensation is valid (can only increase density by one level)
                         let current_density = asset_state.data.density as u8;
                         let new_density = data.density as u8;
                         if new_density <= current_density {
-                            return Err(HazeError::InvalidTransaction(
-                                "Condensation must increase density".to_string()
+                            return Err(HazeError::InvalidDensityTransition(
+                                format!("{:?}", asset_state.data.density),
+                                format!("{:?}", data.density)
+                            ));
+                        }
+                        
+                        // Validate density transition (can only go up by one level)
+                        let expected_next = match asset_state.data.density {
+                            crate::types::DensityLevel::Ethereal => crate::types::DensityLevel::Light,
+                            crate::types::DensityLevel::Light => crate::types::DensityLevel::Dense,
+                            crate::types::DensityLevel::Dense => crate::types::DensityLevel::Core,
+                            crate::types::DensityLevel::Core => {
+                                return Err(HazeError::InvalidDensityTransition(
+                                    format!("{:?}", asset_state.data.density),
+                                    format!("{:?}", data.density)
+                                ));
+                            }
+                        };
+                        
+                        if data.density != expected_next {
+                            return Err(HazeError::InvalidDensityTransition(
+                                format!("{:?}", asset_state.data.density),
+                                format!("{:?}", data.density)
+                            ));
+                        }
+                        
+                        // Validate new metadata size
+                        let new_metadata_size: usize = data.metadata.iter()
+                            .filter(|(k, _)| !k.starts_with('_'))
+                            .map(|(_, v)| v.len())
+                            .sum();
+                        
+                        if new_metadata_size > data.density.max_size() {
+                            return Err(HazeError::AssetSizeExceeded(
+                                new_metadata_size,
+                                data.density.max_size()
                             ));
                         }
                         
                         // Update density and merge new data
                         let new_density_str = format!("{:?}", data.density);
+                        let old_density = asset_state.data.density;
                         asset_state.data.density = data.density;
+                        
+                        // Process blob_refs from metadata (special key "_blob_refs" as JSON)
+                        if let Some(blob_refs_json) = data.metadata.get("_blob_refs") {
+                            if let Ok(blob_refs_map) = serde_json::from_str::<HashMap<String, String>>(blob_refs_json) {
+                                for (key, hash_hex) in blob_refs_map {
+                                    if let Ok(hash_bytes) = hex::decode(&hash_hex) {
+                                        if hash_bytes.len() == 32 {
+                                            let mut hash = [0u8; 32];
+                                            hash.copy_from_slice(&hash_bytes);
+                                            asset_state.blob_refs.insert(key, hash);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Update metadata (excluding special keys)
                         for (key, value) in &data.metadata {
-                            asset_state.data.metadata.insert(key.clone(), value.clone());
+                            if !key.starts_with('_') {
+                                asset_state.data.metadata.insert(key.clone(), value.clone());
+                            }
                         }
                         asset_state.data.attributes.extend(data.attributes.clone());
                         asset_state.updated_at = chrono::Utc::now().timestamp();
+                        
+                        // Record changes in history
+                        let mut changes = HashMap::new();
+                        changes.insert("old_density".to_string(), format!("{:?}", old_density));
+                        changes.insert("new_density".to_string(), format!("{:?}", data.density));
+                        for (key, value) in &data.metadata {
+                            if !key.starts_with('_') {
+                                changes.insert(format!("metadata.{}", key), value.clone());
+                            }
+                        }
+                        Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Condense, changes);
                         
                         self.assets.insert(*asset_id, asset_state);
                         
@@ -323,24 +573,52 @@ impl StateManager {
                         
                         // Verify ownership
                         if asset_state.owner != data.owner {
-                            return Err(HazeError::InvalidTransaction(
+                            return Err(HazeError::AccessDenied(
                                 "Asset ownership mismatch".to_string()
                             ));
                         }
                         
-                        // Check if evaporation is valid (can only decrease density)
+                        // Check if evaporation is valid (can only decrease density by one level)
                         let current_density = asset_state.data.density as u8;
                         let new_density = data.density as u8;
                         if new_density >= current_density {
-                            return Err(HazeError::InvalidTransaction(
-                                "Evaporation must decrease density".to_string()
+                            return Err(HazeError::InvalidDensityTransition(
+                                format!("{:?}", asset_state.data.density),
+                                format!("{:?}", data.density)
+                            ));
+                        }
+                        
+                        // Validate density transition (can only go down by one level)
+                        let expected_prev = match asset_state.data.density {
+                            crate::types::DensityLevel::Core => crate::types::DensityLevel::Dense,
+                            crate::types::DensityLevel::Dense => crate::types::DensityLevel::Light,
+                            crate::types::DensityLevel::Light => crate::types::DensityLevel::Ethereal,
+                            crate::types::DensityLevel::Ethereal => {
+                                return Err(HazeError::InvalidDensityTransition(
+                                    format!("{:?}", asset_state.data.density),
+                                    format!("{:?}", data.density)
+                                ));
+                            }
+                        };
+                        
+                        if data.density != expected_prev {
+                            return Err(HazeError::InvalidDensityTransition(
+                                format!("{:?}", asset_state.data.density),
+                                format!("{:?}", data.density)
                             ));
                         }
                         
                         // Update density
                         let new_density_str = format!("{:?}", data.density);
+                        let old_density = asset_state.data.density;
                         asset_state.data.density = data.density;
                         asset_state.updated_at = chrono::Utc::now().timestamp();
+                        
+                        // Record changes in history
+                        let mut changes = HashMap::new();
+                        changes.insert("old_density".to_string(), format!("{:?}", old_density));
+                        changes.insert("new_density".to_string(), format!("{:?}", data.density));
+                        Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Evaporate, changes);
                         
                         self.assets.insert(*asset_id, asset_state);
                         
@@ -387,8 +665,29 @@ impl StateManager {
                         
                         // Verify both assets have the same owner
                         if asset_state.owner != other_asset_state.owner || asset_state.owner != data.owner {
-                            return Err(HazeError::InvalidTransaction(
+                            return Err(HazeError::AccessDenied(
                                 "Cannot merge assets with different owners".to_string()
+                            ));
+                        }
+                        
+                        // Validate merged size won't exceed Core density limit
+                        let current_size: usize = asset_state.data.metadata.values().map(|v| v.len()).sum();
+                        let other_size: usize = other_asset_state.data.metadata.iter()
+                            .filter(|(k, _)| !k.starts_with('_'))
+                            .map(|(_, v)| v.len())
+                            .sum();
+                        let merged_metadata_size = current_size + other_size;
+                        
+                        let max_density = if asset_state.data.density as u8 > other_asset_state.data.density as u8 {
+                            asset_state.data.density
+                        } else {
+                            other_asset_state.data.density
+                        };
+                        
+                        if merged_metadata_size > max_density.max_size() {
+                            return Err(HazeError::AssetSizeExceeded(
+                                merged_metadata_size,
+                                max_density.max_size()
                             ));
                         }
                         
@@ -402,12 +701,24 @@ impl StateManager {
                         // Merge attributes
                         asset_state.data.attributes.extend(other_asset_state.data.attributes.clone());
                         
+                        // Merge blob_refs
+                        for (key, hash) in &other_asset_state.blob_refs {
+                            if !asset_state.blob_refs.contains_key(key) {
+                                asset_state.blob_refs.insert(key.clone(), *hash);
+                            }
+                        }
+                        
                         // Increase density if needed
                         if other_asset_state.data.density as u8 > asset_state.data.density as u8 {
                             asset_state.data.density = other_asset_state.data.density;
                         }
                         
                         asset_state.updated_at = chrono::Utc::now().timestamp();
+                        
+                        // Record changes in history
+                        let mut changes = HashMap::new();
+                        changes.insert("merged_asset_id".to_string(), hex::encode(other_asset_id));
+                        Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Merge, changes);
                         
                         // Update source asset
                         self.assets.insert(*asset_id, asset_state.clone());
@@ -451,8 +762,15 @@ impl StateManager {
                         
                         // Verify ownership
                         if source_asset_state.owner != data.owner {
-                            return Err(HazeError::InvalidTransaction(
+                            return Err(HazeError::AccessDenied(
                                 "Asset ownership mismatch".to_string()
+                            ));
+                        }
+                        
+                        // Validate component count (reasonable limit)
+                        if components.len() > 100 {
+                            return Err(HazeError::InvalidTransaction(
+                                "Split operation cannot create more than 100 components".to_string()
                             ));
                         }
                         
@@ -480,15 +798,31 @@ impl StateManager {
                             ].concat());
                             
                             // Create component asset state
-                            let component_asset_state = AssetState {
+                            let mut component_asset_state = AssetState {
                                 owner: source_asset_state.owner,
                                 data: component_data,
                                 created_at: chrono::Utc::now().timestamp(),
                                 updated_at: chrono::Utc::now().timestamp(),
+                                blob_refs: HashMap::new(), // Components start with empty blob_refs
+                                history: Vec::new(),
                             };
+                            
+                            // Add creation to history
+                            let mut changes = HashMap::new();
+                            changes.insert("source_asset_id".to_string(), hex::encode(asset_id));
+                            changes.insert("component_name".to_string(), component_name.clone());
+                            Self::add_asset_history(&mut component_asset_state, crate::types::AssetAction::Split, changes);
                             
                             self.assets.insert(component_asset_id, component_asset_state);
                             created_asset_ids.push(hex::encode(component_asset_id));
+                        }
+                        
+                        // Record split in source asset history before removing
+                        if let Some(mut source_state) = self.assets.get_mut(asset_id) {
+                            let mut changes = HashMap::new();
+                            changes.insert("components".to_string(), components_str.clone());
+                            changes.insert("created_assets".to_string(), created_asset_ids.join(","));
+                            Self::add_asset_history(&mut source_state, crate::types::AssetAction::Split, changes);
                         }
                         
                         // Remove or update source asset (for now, we remove it)

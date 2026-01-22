@@ -138,6 +138,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/api/v1/accounts/:address", get(get_account))
         .route("/api/v1/accounts/:address/balance", get(get_balance))
         .route("/api/v1/assets/:asset_id", get(get_asset))
+        .route("/api/v1/assets/:asset_id/history", get(get_asset_history))
         .route("/api/v1/assets", post(create_asset))
         .route("/api/v1/assets/search", get(search_assets))
         .route("/api/v1/assets/:asset_id/condense", post(condense_asset))
@@ -387,6 +388,11 @@ async fn get_asset(
     asset_id.copy_from_slice(&asset_id_bytes);
     
     if let Some(asset_state) = api_state.state.get_asset(&asset_id) {
+        // Convert blob_refs to hex strings for JSON
+        let blob_refs_json: std::collections::HashMap<String, String> = asset_state.blob_refs.iter()
+            .map(|(k, v)| (k.clone(), hex::encode(v)))
+            .collect();
+        
         let asset_json = serde_json::json!({
             "asset_id": hex::encode(asset_id),
             "owner": hex::encode(asset_state.owner),
@@ -396,8 +402,50 @@ async fn get_asset(
             "game_id": asset_state.data.game_id,
             "created_at": asset_state.created_at,
             "updated_at": asset_state.updated_at,
+            "blob_refs": blob_refs_json,
+            "history_count": asset_state.history.len(),
         });
         Ok(Json(ApiResponse::success(asset_json)))
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+/// Get asset history query parameters
+#[derive(Debug, Deserialize)]
+pub struct AssetHistoryQuery {
+    pub limit: Option<usize>,
+}
+
+/// Get asset history
+async fn get_asset_history(
+    State(api_state): State<ApiState>,
+    Path(asset_id_str): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<AssetHistoryQuery>,
+) -> ApiResult<Json<ApiResponse<Vec<serde_json::Value>>>> {
+    let asset_id_bytes = hex::decode(&asset_id_str)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    if asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let mut asset_id = [0u8; 32];
+    asset_id.copy_from_slice(&asset_id_bytes);
+    
+    let limit = query.limit.unwrap_or(0); // 0 = all
+    
+    if let Some(history) = api_state.state.get_asset_history(&asset_id, limit) {
+        let history_json: Vec<serde_json::Value> = history.iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "timestamp": entry.timestamp,
+                    "action": format!("{:?}", entry.action),
+                    "changes": entry.changes,
+                })
+            })
+            .collect();
+        Ok(Json(ApiResponse::success(history_json)))
     } else {
         Err(StatusCode::NOT_FOUND)
     }

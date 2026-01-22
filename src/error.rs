@@ -19,6 +19,18 @@ pub enum HazeError {
     #[error("Asset error: {0}")]
     Asset(String),
 
+    #[error("Asset size exceeded: {0} bytes exceeds limit of {1} bytes")]
+    AssetSizeExceeded(usize, usize),
+
+    #[error("Invalid metadata format: {0}")]
+    InvalidMetadataFormat(String),
+
+    #[error("Invalid density transition: cannot transition from {0} to {1}")]
+    InvalidDensityTransition(String, String),
+
+    #[error("Access denied: {0}")]
+    AccessDenied(String),
+
     #[error("Crypto error: {0}")]
     Crypto(String),
 
