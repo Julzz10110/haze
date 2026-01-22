@@ -350,8 +350,36 @@ impl MistbornAsset {
             }
         }
 
-        // Combine attributes
-        self.data.attributes.extend(other.data.attributes.clone());
+        // Merge attributes with conflict resolution
+        // If attribute with same name exists, keep the one with higher rarity
+        // If both have same rarity or both are None, keep the source asset's attribute
+        for other_attr in &other.data.attributes {
+            if let Some(existing) = self.data.attributes.iter_mut().find(|a| a.name == other_attr.name) {
+                // Conflict: attribute with same name exists
+                // Resolve by comparing rarity (higher rarity wins)
+                let should_replace = match (existing.rarity, other_attr.rarity) {
+                    (Some(existing_rarity), Some(other_rarity)) => other_rarity > existing_rarity,
+                    (None, Some(_)) => true, // Other has rarity, existing doesn't
+                    (Some(_), None) => false, // Existing has rarity, other doesn't
+                    (None, None) => false, // Both have no rarity, keep existing
+                };
+                
+                if should_replace {
+                    existing.value = other_attr.value.clone();
+                    existing.rarity = other_attr.rarity;
+                }
+            } else {
+                // No conflict, add the attribute
+                self.data.attributes.push(other_attr.clone());
+            }
+        }
+
+        // Merge blob_refs
+        for (key, hash) in &other.blob_refs {
+            if !self.blob_refs.contains_key(key) {
+                self.blob_refs.insert(key.clone(), *hash);
+            }
+        }
 
         // Increase density if needed
         if other.data.density as u8 > self.data.density as u8 {
@@ -381,9 +409,29 @@ impl MistbornAsset {
                 owner: self.data.owner,
             };
 
-            // Extract component-specific data
+            // Extract component-specific metadata
             if let Some(value) = self.data.metadata.get(&component_name) {
                 component_data.metadata.insert(component_name.clone(), value.clone());
+            }
+
+            // Distribute attributes to components
+            // Attributes with names matching component pattern go to that component
+            // Other attributes are copied to all components (shared attributes)
+            for attr in &self.data.attributes {
+                // If attribute name contains component name, assign to this component
+                if attr.name.contains(&component_name) || attr.name == component_name {
+                    component_data.attributes.push(attr.clone());
+                } else if attr.name.starts_with("shared_") || attr.name == "rarity" || attr.name == "power" {
+                    // Shared attributes (like rarity, power) go to all components
+                    component_data.attributes.push(attr.clone());
+                }
+                // Otherwise, attribute is not assigned to this component
+            }
+
+            // If no component-specific attributes were found, copy all attributes
+            // This ensures components have at least some attributes
+            if component_data.attributes.is_empty() {
+                component_data.attributes = self.data.attributes.clone();
             }
 
             let component_asset = MistbornAsset {
@@ -393,7 +441,7 @@ impl MistbornAsset {
                 ].concat()),
                 data: component_data,
                 history: vec![],
-                blob_refs: HashMap::new(),
+                blob_refs: HashMap::new(), // Components start with empty blob_refs
             };
 
             result.push(component_asset);
@@ -512,6 +560,51 @@ impl MistbornAsset {
             .ok_or_else(|| HazeError::Asset(format!("Blob key {} not found", blob_key)))?;
         
         blob_storage.get_blob(blob_key, blob_hash)
+    }
+
+    /// Add or update an attribute
+    pub fn add_attribute(&mut self, name: String, value: String, rarity: Option<f64>) {
+        // Check if attribute already exists
+        if let Some(existing) = self.data.attributes.iter_mut().find(|a| a.name == name) {
+            existing.value = value;
+            existing.rarity = rarity;
+        } else {
+            self.data.attributes.push(crate::types::Attribute {
+                name,
+                value,
+                rarity,
+            });
+        }
+    }
+
+    /// Update an existing attribute's value
+    pub fn update_attribute(&mut self, name: &str, value: String) -> Result<()> {
+        let attr = self.data.attributes.iter_mut()
+            .find(|a| a.name == name)
+            .ok_or_else(|| HazeError::Asset(format!("Attribute '{}' not found", name)))?;
+        
+        attr.value = value;
+        Ok(())
+    }
+
+    /// Remove an attribute
+    pub fn remove_attribute(&mut self, name: &str) -> Result<()> {
+        let index = self.data.attributes.iter()
+            .position(|a| a.name == name)
+            .ok_or_else(|| HazeError::Asset(format!("Attribute '{}' not found", name)))?;
+        
+        self.data.attributes.remove(index);
+        Ok(())
+    }
+
+    /// Get an attribute by name
+    pub fn get_attribute(&self, name: &str) -> Option<&crate::types::Attribute> {
+        self.data.attributes.iter().find(|a| a.name == name)
+    }
+
+    /// Get all attributes
+    pub fn get_attributes(&self) -> &[crate::types::Attribute] {
+        &self.data.attributes
     }
 }
 
@@ -639,5 +732,113 @@ mod tests {
         
         // Cleanup
         std::fs::remove_dir_all(&config.storage.blob_storage_path).ok();
+    }
+
+    #[test]
+    fn test_add_and_get_attribute() {
+        let asset_id = sha256(b"test_asset");
+        let owner = [0u8; 32];
+        let mut asset = MistbornAsset::create(
+            asset_id,
+            owner,
+            DensityLevel::Ethereal,
+            HashMap::new(),
+        );
+
+        asset.add_attribute("damage".to_string(), "10".to_string(), Some(0.5));
+        
+        let attr = asset.get_attribute("damage").unwrap();
+        assert_eq!(attr.value, "10");
+        assert_eq!(attr.rarity, Some(0.5));
+    }
+
+    #[test]
+    fn test_update_attribute() {
+        let asset_id = sha256(b"test_asset");
+        let owner = [0u8; 32];
+        let mut asset = MistbornAsset::create(
+            asset_id,
+            owner,
+            DensityLevel::Ethereal,
+            HashMap::new(),
+        );
+
+        asset.add_attribute("damage".to_string(), "10".to_string(), None);
+        asset.update_attribute("damage", "15".to_string()).unwrap();
+        
+        let attr = asset.get_attribute("damage").unwrap();
+        assert_eq!(attr.value, "15");
+    }
+
+    #[test]
+    fn test_remove_attribute() {
+        let asset_id = sha256(b"test_asset");
+        let owner = [0u8; 32];
+        let mut asset = MistbornAsset::create(
+            asset_id,
+            owner,
+            DensityLevel::Ethereal,
+            HashMap::new(),
+        );
+
+        asset.add_attribute("damage".to_string(), "10".to_string(), None);
+        assert!(asset.get_attribute("damage").is_some());
+        
+        asset.remove_attribute("damage").unwrap();
+        assert!(asset.get_attribute("damage").is_none());
+    }
+
+    #[test]
+    fn test_merge_attributes_conflict_resolution() {
+        let asset_id_1 = sha256(b"asset1");
+        let asset_id_2 = sha256(b"asset2");
+        let owner = [0u8; 32];
+        
+        let mut asset1 = MistbornAsset::create(
+            asset_id_1,
+            owner,
+            DensityLevel::Ethereal,
+            HashMap::new(),
+        );
+        asset1.add_attribute("power".to_string(), "10".to_string(), Some(0.3));
+
+        let mut asset2 = MistbornAsset::create(
+            asset_id_2,
+            owner,
+            DensityLevel::Ethereal,
+            HashMap::new(),
+        );
+        asset2.add_attribute("power".to_string(), "20".to_string(), Some(0.8)); // Higher rarity
+
+        asset1.merge(&asset2).unwrap();
+        
+        // Should keep attribute with higher rarity
+        let attr = asset1.get_attribute("power").unwrap();
+        assert_eq!(attr.value, "20");
+        assert_eq!(attr.rarity, Some(0.8));
+    }
+
+    #[test]
+    fn test_split_attributes_distribution() {
+        let asset_id = sha256(b"composite");
+        let owner = [0u8; 32];
+        let mut asset = MistbornAsset::create(
+            asset_id,
+            owner,
+            DensityLevel::Ethereal,
+            HashMap::new(),
+        );
+
+        asset.add_attribute("component1_power".to_string(), "10".to_string(), None);
+        asset.add_attribute("shared_rarity".to_string(), "epic".to_string(), Some(0.9));
+        asset.add_attribute("power".to_string(), "100".to_string(), None);
+
+        let components = asset.split(vec!["component1".to_string(), "component2".to_string()]).unwrap();
+        
+        // Component 1 should have component1_power and shared attributes
+        let comp1 = &components[0];
+        assert!(comp1.get_attribute("component1_power").is_some());
+        assert!(comp1.get_attribute("shared_rarity").is_some());
+        assert!(comp1.get_attribute("power").is_some());
     }
 }

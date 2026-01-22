@@ -24,6 +24,11 @@ pub struct StateManager {
     tokenomics: Arc<Tokenomics>,
     economy: Arc<FogEconomy>,
     ws_tx: Arc<RwLock<Option<broadcast::Sender<WsEvent>>>>,
+    
+    // Indexes for fast asset search
+    asset_index_by_owner: Arc<DashMap<Address, Vec<Hash>>>,
+    asset_index_by_game_id: Arc<DashMap<String, Vec<Hash>>>,
+    asset_index_by_density: Arc<DashMap<u8, Vec<Hash>>>, // Using u8 for density level
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -41,6 +46,15 @@ pub struct AssetHistoryEntry {
     pub changes: HashMap<String, String>,
 }
 
+/// Asset version snapshot
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssetVersion {
+    pub version: u64,
+    pub timestamp: i64,
+    pub data: crate::types::AssetData,
+    pub blob_refs: HashMap<String, Hash>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AssetState {
     pub owner: Address,
@@ -54,6 +68,12 @@ pub struct AssetState {
     /// History of asset changes (limited to last 100 entries)
     #[serde(default)]
     pub history: Vec<AssetHistoryEntry>,
+    /// Version snapshots (limited to last 10 versions)
+    #[serde(default)]
+    pub versions: Vec<AssetVersion>,
+    /// Current version number (increments on each snapshot)
+    #[serde(default)]
+    pub current_version: u64,
 }
 
 impl StateManager {
@@ -92,6 +112,9 @@ impl StateManager {
             tokenomics: Arc::new(Tokenomics::new()),
             economy: Arc::new(FogEconomy::new()),
             ws_tx: Arc::new(RwLock::new(None)),
+            asset_index_by_owner: Arc::new(DashMap::new()),
+            asset_index_by_game_id: Arc::new(DashMap::new()),
+            asset_index_by_density: Arc::new(DashMap::new()),
         })
     }
 
@@ -120,6 +143,91 @@ impl StateManager {
         // Limit history to last 100 entries
         if asset_state.history.len() > 100 {
             asset_state.history.remove(0);
+        }
+    }
+
+    /// Create a version snapshot from asset state
+    fn create_version_from_state(asset_state: &AssetState) -> AssetVersion {
+        AssetVersion {
+            version: asset_state.current_version + 1,
+            timestamp: chrono::Utc::now().timestamp(),
+            data: asset_state.data.clone(),
+            blob_refs: asset_state.blob_refs.clone(),
+        }
+    }
+
+    /// Add snapshot to asset state (limited to last 10 versions)
+    fn add_asset_snapshot(asset_state: &mut AssetState) {
+        let snapshot = Self::create_version_from_state(asset_state);
+        asset_state.current_version = snapshot.version;
+        asset_state.versions.push(snapshot);
+        
+        // Limit versions to last 10
+        if asset_state.versions.len() > 10 {
+            asset_state.versions.remove(0);
+        }
+    }
+
+    /// Add asset to indexes (only if not already present)
+    fn add_asset_to_indexes(&self, asset_id: &Hash, asset_state: &AssetState) {
+        // Index by owner
+        let mut owner_assets = self.asset_index_by_owner
+            .entry(asset_state.owner)
+            .or_insert_with(Vec::new);
+        if !owner_assets.contains(asset_id) {
+            owner_assets.push(*asset_id);
+        }
+        
+        // Index by game_id
+        if let Some(ref game_id) = asset_state.data.game_id {
+            let mut game_assets = self.asset_index_by_game_id
+                .entry(game_id.clone())
+                .or_insert_with(Vec::new);
+            if !game_assets.contains(asset_id) {
+                game_assets.push(*asset_id);
+            }
+        }
+        
+        // Index by density
+        let density_level = asset_state.data.density as u8;
+        let mut density_assets = self.asset_index_by_density
+            .entry(density_level)
+            .or_insert_with(Vec::new);
+        if !density_assets.contains(asset_id) {
+            density_assets.push(*asset_id);
+        }
+    }
+
+    /// Remove asset from indexes
+    fn remove_asset_from_indexes(&self, asset_id: &Hash, asset_state: &AssetState) {
+        // Remove from owner index
+        if let Some(mut owner_assets) = self.asset_index_by_owner.get_mut(&asset_state.owner) {
+            owner_assets.retain(|&id| id != *asset_id);
+            if owner_assets.is_empty() {
+                drop(owner_assets);
+                self.asset_index_by_owner.remove(&asset_state.owner);
+            }
+        }
+        
+        // Remove from game_id index
+        if let Some(ref game_id) = asset_state.data.game_id {
+            if let Some(mut game_assets) = self.asset_index_by_game_id.get_mut(game_id) {
+                game_assets.retain(|&id| id != *asset_id);
+                if game_assets.is_empty() {
+                    drop(game_assets);
+                    self.asset_index_by_game_id.remove(game_id);
+                }
+            }
+        }
+        
+        // Remove from density index
+        let density_level = asset_state.data.density as u8;
+        if let Some(mut density_assets) = self.asset_index_by_density.get_mut(&density_level) {
+            density_assets.retain(|&id| id != *asset_id);
+            if density_assets.is_empty() {
+                drop(density_assets);
+                self.asset_index_by_density.remove(&density_level);
+            }
         }
     }
 
@@ -178,6 +286,107 @@ impl StateManager {
                 history
             }
         })
+    }
+
+    /// Get asset version by version number
+    ///
+    /// # Arguments
+    /// * `asset_id` - The asset identifier (hash)
+    /// * `version` - The version number (0 = current version)
+    ///
+    /// # Returns
+    /// `Some(AssetVersion)` if the version exists, `None` otherwise.
+    pub fn get_asset_version(&self, asset_id: &Hash, version: u64) -> Option<AssetVersion> {
+        self.assets.get(asset_id).and_then(|asset_state| {
+            if version == 0 || version == asset_state.current_version {
+                // Return current version
+                Some(AssetVersion {
+                    version: asset_state.current_version,
+                    timestamp: asset_state.updated_at,
+                    data: asset_state.data.clone(),
+                    blob_refs: asset_state.blob_refs.clone(),
+                })
+            } else {
+                // Find version in history
+                asset_state.versions.iter()
+                    .find(|v| v.version == version)
+                    .cloned()
+            }
+        })
+    }
+
+    /// Get all versions of an asset
+    pub fn get_asset_versions(&self, asset_id: &Hash) -> Option<Vec<AssetVersion>> {
+        self.assets.get(asset_id).map(|asset_state| {
+            let mut versions = asset_state.versions.clone();
+            // Add current version only if it's not already in versions
+            let current_exists = versions.iter().any(|v| v.version == asset_state.current_version);
+            if !current_exists {
+                versions.push(AssetVersion {
+                    version: asset_state.current_version,
+                    timestamp: asset_state.updated_at,
+                    data: asset_state.data.clone(),
+                    blob_refs: asset_state.blob_refs.clone(),
+                });
+            }
+            versions.sort_by_key(|v| v.version);
+            versions
+        })
+    }
+
+    /// Create a manual snapshot of an asset
+    pub fn create_asset_snapshot(&self, asset_id: &Hash) -> Result<u64> {
+        let mut asset_state = self.assets.get_mut(asset_id)
+            .ok_or_else(|| HazeError::InvalidTransaction(
+                "Asset not found".to_string()
+            ))?;
+        
+        Self::add_asset_snapshot(&mut asset_state);
+        Ok(asset_state.current_version)
+    }
+
+    /// Search assets by owner
+    pub fn search_assets_by_owner(&self, owner: &Address) -> Vec<Hash> {
+        self.asset_index_by_owner
+            .get(owner)
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// Search assets by game_id
+    pub fn search_assets_by_game_id(&self, game_id: &str) -> Vec<Hash> {
+        self.asset_index_by_game_id
+            .get(game_id)
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// Search assets by density level
+    pub fn search_assets_by_density(&self, density: crate::types::DensityLevel) -> Vec<Hash> {
+        let density_level = density as u8;
+        self.asset_index_by_density
+            .get(&density_level)
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// Full-text search in metadata (simple substring matching)
+    pub fn search_assets_by_metadata(&self, query: &str) -> Vec<Hash> {
+        let query_lower = query.to_lowercase();
+        let mut results = Vec::new();
+        
+        for entry in self.assets.iter() {
+            let asset_state = entry.value();
+            // Search in metadata values
+            for value in asset_state.data.metadata.values() {
+                if value.to_lowercase().contains(&query_lower) {
+                    results.push(*entry.key());
+                    break; // Found match, no need to check other values for this asset
+                }
+            }
+        }
+        
+        results
     }
 
     /// Get block by hash
@@ -341,6 +550,8 @@ impl StateManager {
                             updated_at: chrono::Utc::now().timestamp(),
                             blob_refs,
                             history: Vec::new(),
+                            versions: Vec::new(),
+                            current_version: 0,
                         };
                         
                         // Remove special metadata keys before storing
@@ -348,6 +559,12 @@ impl StateManager {
                         
                         // Add creation to history
                         Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Create, HashMap::new());
+                        
+                        // Create initial snapshot
+                        Self::add_asset_snapshot(&mut asset_state);
+                        
+                        // Add to indexes
+                        self.add_asset_to_indexes(asset_id, &asset_state);
                         
                         self.assets.insert(*asset_id, asset_state);
                         
@@ -444,12 +661,48 @@ impl StateManager {
                         asset_state.data.attributes = data.attributes.clone();
                         asset_state.updated_at = chrono::Utc::now().timestamp();
                         
+                        // Update indexes if game_id or density changed
+                        let old_game_id = asset_state.data.game_id.clone();
+                        let old_density = asset_state.data.density as u8;
+                        
                         // Record changes in history
                         let changes: HashMap<String, String> = data.metadata.iter()
                             .filter(|(k, _)| !k.starts_with('_'))
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
                         Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Update, changes);
+                        
+                        // Update indexes if needed
+                        let new_game_id = asset_state.data.game_id.clone();
+                        let new_density = asset_state.data.density as u8;
+                        
+                        if old_game_id != new_game_id {
+                            // Remove from old game_id index
+                            if let Some(ref old_game) = old_game_id {
+                                if let Some(mut game_assets) = self.asset_index_by_game_id.get_mut(old_game) {
+                                    game_assets.retain(|&id| id != *asset_id);
+                                }
+                            }
+                            // Add to new game_id index
+                            if let Some(ref new_game) = new_game_id {
+                                self.asset_index_by_game_id
+                                    .entry(new_game.clone())
+                                    .or_insert_with(Vec::new)
+                                    .push(*asset_id);
+                            }
+                        }
+                        
+                        if old_density != new_density {
+                            // Remove from old density index
+                            if let Some(mut density_assets) = self.asset_index_by_density.get_mut(&old_density) {
+                                density_assets.retain(|&id| id != *asset_id);
+                            }
+                            // Add to new density index
+                            self.asset_index_by_density
+                                .entry(new_density)
+                                .or_insert_with(Vec::new)
+                                .push(*asset_id);
+                        }
                         
                         self.assets.insert(*asset_id, asset_state);
                         
@@ -556,6 +809,22 @@ impl StateManager {
                         }
                         Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Condense, changes);
                         
+                        // Create snapshot for important change (condense)
+                        Self::add_asset_snapshot(&mut asset_state);
+                        
+                        // Update density index
+                        let old_density = old_density as u8;
+                        let new_density = asset_state.data.density as u8;
+                        if old_density != new_density {
+                            if let Some(mut density_assets) = self.asset_index_by_density.get_mut(&old_density) {
+                                density_assets.retain(|&id| id != *asset_id);
+                            }
+                            self.asset_index_by_density
+                                .entry(new_density)
+                                .or_insert_with(Vec::new)
+                                .push(*asset_id);
+                        }
+                        
                         self.assets.insert(*asset_id, asset_state);
                         
                         // Broadcast WebSocket event
@@ -619,6 +888,19 @@ impl StateManager {
                         changes.insert("old_density".to_string(), format!("{:?}", old_density));
                         changes.insert("new_density".to_string(), format!("{:?}", data.density));
                         Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Evaporate, changes);
+                        
+                        // Update density index
+                        let old_density = old_density as u8;
+                        let new_density = asset_state.data.density as u8;
+                        if old_density != new_density {
+                            if let Some(mut density_assets) = self.asset_index_by_density.get_mut(&old_density) {
+                                density_assets.retain(|&id| id != *asset_id);
+                            }
+                            self.asset_index_by_density
+                                .entry(new_density)
+                                .or_insert_with(Vec::new)
+                                .push(*asset_id);
+                        }
                         
                         self.assets.insert(*asset_id, asset_state);
                         
@@ -698,8 +980,29 @@ impl StateManager {
                             }
                         }
                         
-                        // Merge attributes
-                        asset_state.data.attributes.extend(other_asset_state.data.attributes.clone());
+                        // Merge attributes with conflict resolution
+                        // If attribute with same name exists, keep the one with higher rarity
+                        // If both have same rarity or both are None, keep the source asset's attribute
+                        for other_attr in &other_asset_state.data.attributes {
+                            if let Some(existing) = asset_state.data.attributes.iter_mut().find(|a| a.name == other_attr.name) {
+                                // Conflict: attribute with same name exists
+                                // Resolve by comparing rarity (higher rarity wins)
+                                let should_replace = match (existing.rarity, other_attr.rarity) {
+                                    (Some(existing_rarity), Some(other_rarity)) => other_rarity > existing_rarity,
+                                    (None, Some(_)) => true, // Other has rarity, existing doesn't
+                                    (Some(_), None) => false, // Existing has rarity, other doesn't
+                                    (None, None) => false, // Both have no rarity, keep existing
+                                };
+                                
+                                if should_replace {
+                                    existing.value = other_attr.value.clone();
+                                    existing.rarity = other_attr.rarity;
+                                }
+                            } else {
+                                // No conflict, add the attribute
+                                asset_state.data.attributes.push(other_attr.clone());
+                            }
+                        }
                         
                         // Merge blob_refs
                         for (key, hash) in &other_asset_state.blob_refs {
@@ -720,10 +1023,29 @@ impl StateManager {
                         changes.insert("merged_asset_id".to_string(), hex::encode(other_asset_id));
                         Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Merge, changes);
                         
+                        // Create snapshot for important change (merge)
+                        Self::add_asset_snapshot(&mut asset_state);
+                        
                         // Update source asset
                         self.assets.insert(*asset_id, asset_state.clone());
                         
-                        // Remove merged asset
+                        // Update indexes for merged asset (density might have changed)
+                        let old_density = asset_state.data.density as u8;
+                        let new_density = asset_state.data.density as u8;
+                        if old_density != new_density {
+                            if let Some(mut density_assets) = self.asset_index_by_density.get_mut(&old_density) {
+                                density_assets.retain(|&id| id != *asset_id);
+                            }
+                            self.asset_index_by_density
+                                .entry(new_density)
+                                .or_insert_with(Vec::new)
+                                .push(*asset_id);
+                        }
+                        
+                        // Remove merged asset from indexes and state
+                        if let Some(other_state) = self.assets.get(&other_asset_id) {
+                            self.remove_asset_from_indexes(&other_asset_id, &other_state);
+                        }
                         self.assets.remove(&other_asset_id);
                         
                         // Broadcast WebSocket event
@@ -791,6 +1113,26 @@ impl StateManager {
                                 component_data.metadata.insert(component_name.clone(), value.clone());
                             }
                             
+                            // Distribute attributes to components
+                            // Attributes with names matching component pattern go to that component
+                            // Other attributes are copied to all components (shared attributes)
+                            for attr in &source_asset_state.data.attributes {
+                                // If attribute name contains component name, assign to this component
+                                if attr.name.contains(component_name) || attr.name == *component_name {
+                                    component_data.attributes.push(attr.clone());
+                                } else if attr.name.starts_with("shared_") || attr.name == "rarity" || attr.name == "power" {
+                                    // Shared attributes (like rarity, power) go to all components
+                                    component_data.attributes.push(attr.clone());
+                                }
+                                // Otherwise, attribute is not assigned to this component
+                            }
+                            
+                            // If no component-specific attributes were found, copy all attributes
+                            // This ensures components have at least some attributes
+                            if component_data.attributes.is_empty() {
+                                component_data.attributes = source_asset_state.data.attributes.clone();
+                            }
+                            
                             // Generate component asset ID
                             let component_asset_id = crate::types::sha256(&[
                                 asset_id.as_ref(),
@@ -805,6 +1147,8 @@ impl StateManager {
                                 updated_at: chrono::Utc::now().timestamp(),
                                 blob_refs: HashMap::new(), // Components start with empty blob_refs
                                 history: Vec::new(),
+                                versions: Vec::new(),
+                                current_version: 0,
                             };
                             
                             // Add creation to history
@@ -812,6 +1156,12 @@ impl StateManager {
                             changes.insert("source_asset_id".to_string(), hex::encode(asset_id));
                             changes.insert("component_name".to_string(), component_name.clone());
                             Self::add_asset_history(&mut component_asset_state, crate::types::AssetAction::Split, changes);
+                            
+                            // Create initial snapshot for component
+                            Self::add_asset_snapshot(&mut component_asset_state);
+                            
+                            // Add component to indexes
+                            self.add_asset_to_indexes(&component_asset_id, &component_asset_state);
                             
                             self.assets.insert(component_asset_id, component_asset_state);
                             created_asset_ids.push(hex::encode(component_asset_id));
@@ -825,7 +1175,10 @@ impl StateManager {
                             Self::add_asset_history(&mut source_state, crate::types::AssetAction::Split, changes);
                         }
                         
-                        // Remove or update source asset (for now, we remove it)
+                        // Remove source asset from indexes and state
+                        if let Some(source_state) = self.assets.get(asset_id) {
+                            self.remove_asset_from_indexes(asset_id, &source_state);
+                        }
                         self.assets.remove(asset_id);
                         
                         // Broadcast WebSocket event
@@ -939,6 +1292,9 @@ impl Clone for StateManager {
             tokenomics: self.tokenomics.clone(),
             economy: self.economy.clone(),
             ws_tx: self.ws_tx.clone(),
+            asset_index_by_owner: self.asset_index_by_owner.clone(),
+            asset_index_by_game_id: self.asset_index_by_game_id.clone(),
+            asset_index_by_density: self.asset_index_by_density.clone(),
         }
     }
 }
@@ -1297,5 +1653,221 @@ mod tests {
         
         // Asset should still exist
         assert!(state_manager.get_asset(&asset_id).is_some());
+    }
+
+    #[test]
+    fn test_asset_history() {
+        let config = create_test_config("history");
+        let state_manager = StateManager::new(&config).unwrap();
+        
+        let owner = create_test_address(1);
+        let asset_id = crate::types::sha256(b"test_asset");
+        
+        // Create asset
+        let tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![1; 64],
+        };
+        
+        state_manager.apply_transaction(&tx).unwrap();
+        
+        // Check history
+        let history = state_manager.get_asset_history(&asset_id, 0).unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(matches!(history[0].action, crate::types::AssetAction::Create));
+    }
+
+    #[test]
+    fn test_search_assets_by_owner() {
+        let config = create_test_config("search_owner");
+        let state_manager = StateManager::new(&config).unwrap();
+        
+        let owner1 = create_test_address(1);
+        let owner2 = create_test_address(2);
+        
+        // Create assets for owner1
+        for i in 0..3 {
+            let asset_id = crate::types::sha256(&format!("asset1_{}", i).into_bytes());
+            let tx = Transaction::MistbornAsset {
+                action: crate::types::AssetAction::Create,
+                asset_id,
+                data: crate::types::AssetData {
+                    density: crate::types::DensityLevel::Ethereal,
+                    metadata: std::collections::HashMap::new(),
+                    attributes: vec![],
+                    game_id: None,
+                    owner: owner1,
+                },
+                signature: vec![1; 64],
+            };
+            state_manager.apply_transaction(&tx).unwrap();
+        }
+        
+        // Create asset for owner2
+        let asset_id2 = crate::types::sha256(b"asset2");
+        let tx2 = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id: asset_id2,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner: owner2,
+            },
+            signature: vec![2; 64],
+        };
+        state_manager.apply_transaction(&tx2).unwrap();
+        
+        // Search by owner1
+        let results = state_manager.search_assets_by_owner(&owner1);
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_search_assets_by_game_id() {
+        let config = create_test_config("search_game");
+        let state_manager = StateManager::new(&config).unwrap();
+        
+        let owner = create_test_address(1);
+        
+        // Create assets with game_id
+        for i in 0..2 {
+            let asset_id = crate::types::sha256(&format!("game_asset_{}", i).into_bytes());
+            let tx = Transaction::MistbornAsset {
+                action: crate::types::AssetAction::Create,
+                asset_id,
+                data: crate::types::AssetData {
+                    density: crate::types::DensityLevel::Ethereal,
+                    metadata: std::collections::HashMap::new(),
+                    attributes: vec![],
+                    game_id: Some("game1".to_string()),
+                    owner,
+                },
+                signature: vec![1; 64],
+            };
+            state_manager.apply_transaction(&tx).unwrap();
+        }
+        
+        // Search by game_id
+        let results = state_manager.search_assets_by_game_id("game1");
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_asset_versions() {
+        let config = create_test_config("versions");
+        let state_manager = StateManager::new(&config).unwrap();
+        
+        let owner = create_test_address(1);
+        let asset_id = crate::types::sha256(b"test_asset");
+        
+        // Create asset
+        let tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![1; 64],
+        };
+        
+        state_manager.apply_transaction(&tx).unwrap();
+        
+        // Check initial version (after create, version 1 should be created)
+        let asset_state = state_manager.get_asset(&asset_id).unwrap();
+        assert_eq!(asset_state.current_version, 1);
+        
+        let versions = state_manager.get_asset_versions(&asset_id).unwrap();
+        // Should have 1 version (version 1 from initial snapshot)
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version, 1);
+        
+        // Create manual snapshot
+        let version = state_manager.create_asset_snapshot(&asset_id).unwrap();
+        assert_eq!(version, 2);
+        
+        // Check versions (should have 2 now)
+        let versions = state_manager.get_asset_versions(&asset_id).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert!(versions.iter().any(|v| v.version == 1));
+        assert!(versions.iter().any(|v| v.version == 2));
+        
+        // Get specific version
+        let v1 = state_manager.get_asset_version(&asset_id, 1).unwrap();
+        assert_eq!(v1.version, 1);
+        
+        let v2 = state_manager.get_asset_version(&asset_id, 2).unwrap();
+        assert_eq!(v2.version, 2);
+        
+        // Get current version (version 0 means current)
+        let v_current = state_manager.get_asset_version(&asset_id, 0).unwrap();
+        assert_eq!(v_current.version, 2);
+    }
+
+    #[test]
+    fn test_asset_versions_on_condense() {
+        let config = create_test_config("versions_condense");
+        let state_manager = StateManager::new(&config).unwrap();
+        
+        let owner = create_test_address(1);
+        let asset_id = crate::types::sha256(b"test_asset");
+        
+        // Create asset
+        let tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![1; 64],
+        };
+        
+        state_manager.apply_transaction(&tx).unwrap();
+        
+        // Condense (should create snapshot)
+        let mut condense_metadata = std::collections::HashMap::new();
+        condense_metadata.insert("new_data".to_string(), "value".to_string());
+        
+        let condense_tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Condense,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Light,
+                metadata: condense_metadata,
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![2; 64],
+        };
+        
+        state_manager.apply_transaction(&condense_tx).unwrap();
+        
+        // Should have 2 versions (initial + condense)
+        let asset_state = state_manager.get_asset(&asset_id).unwrap();
+        assert_eq!(asset_state.current_version, 2); // After condense, version should be 2
+        
+        let versions = state_manager.get_asset_versions(&asset_id).unwrap();
+        assert_eq!(versions.len(), 2);
+        // Versions should be sorted, so version 1 first, then version 2
+        let sorted_versions: Vec<u64> = versions.iter().map(|v| v.version).collect();
+        assert_eq!(sorted_versions, vec![1, 2]);
     }
 }

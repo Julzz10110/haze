@@ -22,7 +22,8 @@ use tokio::sync::broadcast;
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
-use crate::types::{Transaction, AssetAction};
+use crate::types::{Transaction, AssetAction, Hash};
+use crate::state::AssetState;
 pub use crate::ws_events::WsEvent;
 
 // Use std::result::Result for API handlers to avoid conflict with crate::error::Result
@@ -139,6 +140,9 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/api/v1/accounts/:address/balance", get(get_balance))
         .route("/api/v1/assets/:asset_id", get(get_asset))
         .route("/api/v1/assets/:asset_id/history", get(get_asset_history))
+        .route("/api/v1/assets/:asset_id/versions", get(get_asset_versions))
+        .route("/api/v1/assets/:asset_id/versions/:version", get(get_asset_version))
+        .route("/api/v1/assets/:asset_id/snapshot", post(create_asset_snapshot))
         .route("/api/v1/assets", post(create_asset))
         .route("/api/v1/assets/search", get(search_assets))
         .route("/api/v1/assets/:asset_id/condense", post(condense_asset))
@@ -417,6 +421,112 @@ pub struct AssetHistoryQuery {
     pub limit: Option<usize>,
 }
 
+/// Create asset snapshot
+async fn create_asset_snapshot(
+    State(api_state): State<ApiState>,
+    Path(asset_id_str): Path<String>,
+) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let asset_id_bytes = hex::decode(&asset_id_str)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    if asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let mut asset_id = [0u8; 32];
+    asset_id.copy_from_slice(&asset_id_bytes);
+    
+    match api_state.state.create_asset_snapshot(&asset_id) {
+        Ok(version) => {
+            let response = serde_json::json!({
+                "asset_id": hex::encode(asset_id),
+                "version": version,
+                "status": "created",
+            });
+            Ok(Json(ApiResponse::success(response)))
+        }
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// Get asset versions
+async fn get_asset_versions(
+    State(api_state): State<ApiState>,
+    Path(asset_id_str): Path<String>,
+) -> ApiResult<Json<ApiResponse<Vec<serde_json::Value>>>> {
+    let asset_id_bytes = hex::decode(&asset_id_str)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    if asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let mut asset_id = [0u8; 32];
+    asset_id.copy_from_slice(&asset_id_bytes);
+    
+    if let Some(versions) = api_state.state.get_asset_versions(&asset_id) {
+        let versions_json: Vec<serde_json::Value> = versions.iter()
+            .map(|v| {
+                let blob_refs_json: std::collections::HashMap<String, String> = v.blob_refs.iter()
+                    .map(|(k, h)| (k.clone(), hex::encode(h)))
+                    .collect();
+                
+                serde_json::json!({
+                    "version": v.version,
+                    "timestamp": v.timestamp,
+                    "density": format!("{:?}", v.data.density),
+                    "metadata": v.data.metadata,
+                    "attributes": v.data.attributes,
+                    "game_id": v.data.game_id,
+                    "blob_refs": blob_refs_json,
+                })
+            })
+            .collect();
+        Ok(Json(ApiResponse::success(versions_json)))
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+/// Get asset version by version number
+async fn get_asset_version(
+    State(api_state): State<ApiState>,
+    Path((asset_id_str, version_str)): Path<(String, String)>,
+) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let asset_id_bytes = hex::decode(&asset_id_str)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    if asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let mut asset_id = [0u8; 32];
+    asset_id.copy_from_slice(&asset_id_bytes);
+    
+    let version = version_str.parse::<u64>()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    if let Some(asset_version) = api_state.state.get_asset_version(&asset_id, version) {
+        let blob_refs_json: std::collections::HashMap<String, String> = asset_version.blob_refs.iter()
+            .map(|(k, h)| (k.clone(), hex::encode(h)))
+            .collect();
+        
+        let version_json = serde_json::json!({
+            "asset_id": hex::encode(asset_id),
+            "version": asset_version.version,
+            "timestamp": asset_version.timestamp,
+            "density": format!("{:?}", asset_version.data.density),
+            "metadata": asset_version.data.metadata,
+            "attributes": asset_version.data.attributes,
+            "game_id": asset_version.data.game_id,
+            "blob_refs": blob_refs_json,
+        });
+        Ok(Json(ApiResponse::success(version_json)))
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
 /// Get asset history
 async fn get_asset_history(
     State(api_state): State<ApiState>,
@@ -493,7 +603,11 @@ pub struct SearchAssetsQuery {
     pub owner: Option<String>,
     pub game_id: Option<String>,
     pub density: Option<String>,
+    pub q: Option<String>, // Full-text search query
+    pub sort_by: Option<String>, // created_at, updated_at, rarity
+    pub sort_order: Option<String>, // asc, desc
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 /// Condense asset (increase density)
@@ -719,59 +833,125 @@ async fn search_assets(
     axum::extract::Query(query): axum::extract::Query<SearchAssetsQuery>,
 ) -> ApiResult<Json<ApiResponse<Vec<serde_json::Value>>>> {
     let limit = query.limit.unwrap_or(100).min(1000);
-    let mut results = Vec::new();
+    let offset = query.offset.unwrap_or(0);
+    let mut candidate_ids: Vec<Hash> = Vec::new();
     
-    for entry in api_state.state.assets().iter() {
-        let asset_state = entry.value();
-        
-        // Filter by owner
-        if let Some(ref owner_filter) = query.owner {
-            let owner_bytes = hex::decode(owner_filter).ok();
-            if let Some(owner_bytes) = owner_bytes {
-                if owner_bytes.len() == 32 {
-                    let mut owner = [0u8; 32];
-                    owner.copy_from_slice(&owner_bytes);
-                    if asset_state.owner != owner {
-                        continue;
-                    }
-                }
+    // Use indexes for efficient filtering
+    if let Some(ref owner_filter) = query.owner {
+        if let Ok(owner_bytes) = hex::decode(owner_filter) {
+            if owner_bytes.len() == 32 {
+                let mut owner = [0u8; 32];
+                owner.copy_from_slice(&owner_bytes);
+                candidate_ids = api_state.state.search_assets_by_owner(&owner);
             }
         }
-        
-        // Filter by game_id
-        if let Some(ref game_id_filter) = query.game_id {
-            if asset_state.data.game_id.as_ref() != Some(game_id_filter) {
-                continue;
-            }
-        }
-        
-        // Filter by density
-        if let Some(ref density_filter) = query.density {
-            let density_str = format!("{:?}", asset_state.data.density);
-            if density_str != *density_filter {
-                continue;
-            }
-        }
-        
-        let asset_json = serde_json::json!({
-            "asset_id": hex::encode(*entry.key()),
-            "owner": hex::encode(asset_state.owner),
-            "density": format!("{:?}", asset_state.data.density),
-            "metadata": asset_state.data.metadata,
-            "attributes": asset_state.data.attributes,
-            "game_id": asset_state.data.game_id,
-            "created_at": asset_state.created_at,
-            "updated_at": asset_state.updated_at,
-        });
-        
-        results.push(asset_json);
-        
-        if results.len() >= limit {
-            break;
+    } else if let Some(ref game_id_filter) = query.game_id {
+        candidate_ids = api_state.state.search_assets_by_game_id(game_id_filter);
+    } else if let Some(ref density_filter) = query.density {
+        // Parse density level
+        let density = match density_filter.as_str() {
+            "Ethereal" => crate::types::DensityLevel::Ethereal,
+            "Light" => crate::types::DensityLevel::Light,
+            "Dense" => crate::types::DensityLevel::Dense,
+            "Core" => crate::types::DensityLevel::Core,
+            _ => return Err(StatusCode::BAD_REQUEST),
+        };
+        candidate_ids = api_state.state.search_assets_by_density(density);
+    } else {
+        // No specific filter, use all assets
+        candidate_ids = api_state.state.assets().iter().map(|e| *e.key()).collect();
+    }
+    
+    // Apply full-text search if provided
+    if let Some(ref search_query) = query.q {
+        if !search_query.is_empty() {
+            let text_search_results = api_state.state.search_assets_by_metadata(search_query);
+            // Intersect with candidate_ids
+            let text_search_set: std::collections::HashSet<Hash> = text_search_results.into_iter().collect();
+            candidate_ids.retain(|id| text_search_set.contains(id));
         }
     }
     
-    Ok(Json(ApiResponse::success(results)))
+    // Build results
+    let mut results: Vec<(Hash, AssetState)> = candidate_ids.iter()
+        .filter_map(|id| {
+            api_state.state.get_asset(id).map(|state| (*id, state))
+        })
+        .collect();
+    
+    // Sort results
+    let sort_by = query.sort_by.as_deref().unwrap_or("created_at");
+    let sort_order = query.sort_order.as_deref().unwrap_or("desc");
+    let ascending = sort_order == "asc";
+    
+    match sort_by {
+        "created_at" => {
+            results.sort_by(|a, b| {
+                if ascending {
+                    a.1.created_at.cmp(&b.1.created_at)
+                } else {
+                    b.1.created_at.cmp(&a.1.created_at)
+                }
+            });
+        }
+        "updated_at" => {
+            results.sort_by(|a, b| {
+                if ascending {
+                    a.1.updated_at.cmp(&b.1.updated_at)
+                } else {
+                    b.1.updated_at.cmp(&a.1.updated_at)
+                }
+            });
+        }
+        "rarity" => {
+            results.sort_by(|a, b| {
+                let rarity_a = a.1.data.attributes.iter()
+                    .find(|attr| attr.name == "rarity")
+                    .and_then(|attr| attr.rarity)
+                    .unwrap_or(0.0);
+                let rarity_b = b.1.data.attributes.iter()
+                    .find(|attr| attr.name == "rarity")
+                    .and_then(|attr| attr.rarity)
+                    .unwrap_or(0.0);
+                if ascending {
+                    rarity_a.partial_cmp(&rarity_b).unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    rarity_b.partial_cmp(&rarity_a).unwrap_or(std::cmp::Ordering::Equal)
+                }
+            });
+        }
+        _ => {
+            // Default: sort by created_at desc
+            results.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+        }
+    }
+    
+    // Apply pagination
+    let paginated_results: Vec<serde_json::Value> = results
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(asset_id, asset_state)| {
+            let blob_refs_json: std::collections::HashMap<String, String> = asset_state.blob_refs.iter()
+                .map(|(k, v)| (k.clone(), hex::encode(v)))
+                .collect();
+            
+            serde_json::json!({
+                "asset_id": hex::encode(asset_id),
+                "owner": hex::encode(asset_state.owner),
+                "density": format!("{:?}", asset_state.data.density),
+                "metadata": asset_state.data.metadata,
+                "attributes": asset_state.data.attributes,
+                "game_id": asset_state.data.game_id,
+                "created_at": asset_state.created_at,
+                "updated_at": asset_state.updated_at,
+                "blob_refs": blob_refs_json,
+                "history_count": asset_state.history.len(),
+            })
+        })
+        .collect();
+    
+    Ok(Json(ApiResponse::success(paginated_results)))
 }
 
 /// Create liquidity pool request
