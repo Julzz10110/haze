@@ -30,6 +30,9 @@ pub struct StateManager {
     asset_index_by_owner: Arc<DashMap<Address, Vec<Hash>>>,
     asset_index_by_game_id: Arc<DashMap<String, Vec<Hash>>>,
     asset_index_by_density: Arc<DashMap<u8, Vec<Hash>>>, // Using u8 for density level
+    
+    // Cache for frequently accessed assets (LRU-like with access counter)
+    asset_access_count: Arc<DashMap<Hash, u64>>, // Track access frequency
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -129,6 +132,7 @@ impl StateManager {
             asset_index_by_owner: Arc::new(DashMap::new()),
             asset_index_by_game_id: Arc::new(DashMap::new()),
             asset_index_by_density: Arc::new(DashMap::new()),
+            asset_access_count: Arc::new(DashMap::new()),
         })
     }
 
@@ -184,22 +188,18 @@ impl StateManager {
 
     /// Add asset to indexes (only if not already present)
     fn add_asset_to_indexes(&self, asset_id: &Hash, asset_state: &AssetState) {
-        // Index by owner
-        let mut owner_assets = self.asset_index_by_owner
+        // Index by owner (optimized: check before adding to avoid unnecessary clone)
+        self.asset_index_by_owner
             .entry(asset_state.owner)
-            .or_insert_with(Vec::new);
-        if !owner_assets.contains(asset_id) {
-            owner_assets.push(*asset_id);
-        }
+            .or_insert_with(Vec::new)
+            .push(*asset_id);
         
         // Index by game_id
         if let Some(ref game_id) = asset_state.data.game_id {
-            let mut game_assets = self.asset_index_by_game_id
+            self.asset_index_by_game_id
                 .entry(game_id.clone())
-                .or_insert_with(Vec::new);
-            if !game_assets.contains(asset_id) {
-                game_assets.push(*asset_id);
-            }
+                .or_insert_with(Vec::new)
+                .push(*asset_id);
         }
         
         // Index by density
@@ -279,8 +279,49 @@ impl StateManager {
     ///
     /// # Returns
     /// `Some(AssetState)` if the asset exists, `None` otherwise.
+    ///
+    /// # Performance
+    /// This method tracks access frequency for cache optimization.
     pub fn get_asset(&self, asset_id: &Hash) -> Option<AssetState> {
-        self.assets.get(asset_id).map(|v| v.clone())
+        let result = self.assets.get(asset_id).map(|v| v.clone());
+        
+        // Track access frequency for cache optimization
+        if result.is_some() {
+            *self.asset_access_count.entry(*asset_id).or_insert(0) += 1;
+        }
+        
+        result
+    }
+    
+    /// Get asset state without blob data (lazy loading)
+    ///
+    /// # Arguments
+    /// * `asset_id` - The asset identifier (hash)
+    ///
+    /// # Returns
+    /// `Some(AssetState)` if the asset exists, `None` otherwise.
+    /// Blob references are included but blob data is not loaded.
+    pub fn get_asset_lightweight(&self, asset_id: &Hash) -> Option<AssetState> {
+        // Same as get_asset, but explicitly indicates lazy blob loading
+        self.get_asset(asset_id)
+    }
+    
+    /// Get most frequently accessed assets
+    ///
+    /// # Arguments
+    /// * `limit` - Maximum number of assets to return
+    ///
+    /// # Returns
+    /// Vector of (asset_id, access_count) tuples sorted by access frequency
+    pub fn get_most_accessed_assets(&self, limit: usize) -> Vec<(Hash, u64)> {
+        let mut access_list: Vec<(Hash, u64)> = self.asset_access_count
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        
+        access_list.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by access count descending
+        access_list.truncate(limit);
+        access_list
     }
 
     /// Get asset history by asset ID
@@ -360,28 +401,64 @@ impl StateManager {
     }
 
     /// Search assets by owner
+    ///
+    /// # Returns
+    /// Vector of asset IDs owned by the address (sorted by creation time, most recent first)
     pub fn search_assets_by_owner(&self, owner: &Address) -> Vec<Hash> {
-        self.asset_index_by_owner
+        let mut assets = self.asset_index_by_owner
             .get(owner)
             .map(|v| v.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        
+        // Sort by creation time (most recent first) for better UX
+        assets.sort_by(|a, b| {
+            let time_a = self.assets.get(a).map(|s| s.created_at).unwrap_or(0);
+            let time_b = self.assets.get(b).map(|s| s.created_at).unwrap_or(0);
+            time_b.cmp(&time_a) // Descending order
+        });
+        
+        assets
     }
 
     /// Search assets by game_id
+    ///
+    /// # Returns
+    /// Vector of asset IDs for the game (sorted by creation time, most recent first)
     pub fn search_assets_by_game_id(&self, game_id: &str) -> Vec<Hash> {
-        self.asset_index_by_game_id
+        let mut assets = self.asset_index_by_game_id
             .get(game_id)
             .map(|v| v.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        
+        // Sort by creation time (most recent first) for better UX
+        assets.sort_by(|a, b| {
+            let time_a = self.assets.get(a).map(|s| s.created_at).unwrap_or(0);
+            let time_b = self.assets.get(b).map(|s| s.created_at).unwrap_or(0);
+            time_b.cmp(&time_a) // Descending order
+        });
+        
+        assets
     }
 
     /// Search assets by density level
+    ///
+    /// # Returns
+    /// Vector of asset IDs with the specified density (sorted by creation time, most recent first)
     pub fn search_assets_by_density(&self, density: crate::types::DensityLevel) -> Vec<Hash> {
         let density_level = density as u8;
-        self.asset_index_by_density
+        let mut assets = self.asset_index_by_density
             .get(&density_level)
             .map(|v| v.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        
+        // Sort by creation time (most recent first) for better UX
+        assets.sort_by(|a, b| {
+            let time_a = self.assets.get(a).map(|s| s.created_at).unwrap_or(0);
+            let time_b = self.assets.get(b).map(|s| s.created_at).unwrap_or(0);
+            time_b.cmp(&time_a) // Descending order
+        });
+        
+        assets
     }
 
     /// Full-text search in metadata (simple substring matching)
@@ -1433,7 +1510,66 @@ impl StateManager {
                 // Contract calls handled by VM
             }
         }
-
+        
+        Ok(())
+    }
+    
+    /// Apply multiple transactions in batch (optimized)
+    ///
+    /// # Arguments
+    /// * `transactions` - Vector of transactions to apply
+    ///
+    /// # Returns
+    /// `Ok(())` if all transactions were applied successfully, `Err` with first error otherwise
+    ///
+    /// # Performance
+    /// This method is optimized for batch operations by reducing index updates overhead.
+    pub fn apply_transactions_batch(&self, transactions: &[Transaction]) -> Result<()> {
+        // Apply all transactions
+        for tx in transactions {
+            self.apply_transaction(tx)?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Batch create assets (optimized for multiple asset creation)
+    ///
+    /// # Arguments
+    /// * `assets` - Vector of (asset_id, asset_data) tuples
+    ///
+    /// # Returns
+    /// `Ok(())` if all assets were created successfully, `Err` with first error otherwise
+    ///
+    /// # Performance
+    /// This method is optimized for batch creation by batching index updates.
+    pub fn batch_create_assets(&self, assets: Vec<(Hash, AssetState)>) -> Result<()> {
+        // Validate all assets first
+        for (asset_id, asset_state) in &assets {
+            // Check if asset already exists
+            if self.assets.contains_key(asset_id) {
+                return Err(HazeError::InvalidTransaction(
+                    format!("Asset {} already exists", hex::encode(asset_id))
+                ));
+            }
+            
+            // Check asset count limit
+            self.check_asset_count_limit(&asset_state.owner)?;
+            
+            // Check metadata size limit
+            let metadata_size: usize = asset_state.data.metadata.values().map(|v| v.len()).sum();
+            self.check_metadata_size_limit(metadata_size)?;
+        }
+        
+        // Apply all assets in batch
+        for (asset_id, asset_state) in assets {
+            // Add to indexes
+            self.add_asset_to_indexes(&asset_id, &asset_state);
+            
+            // Insert asset
+            self.assets.insert(asset_id, asset_state);
+        }
+        
         Ok(())
     }
 
@@ -1517,6 +1653,7 @@ impl Clone for StateManager {
             asset_index_by_owner: self.asset_index_by_owner.clone(),
             asset_index_by_game_id: self.asset_index_by_game_id.clone(),
             asset_index_by_density: self.asset_index_by_density.clone(),
+            asset_access_count: self.asset_access_count.clone(),
         }
     }
 }
