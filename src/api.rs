@@ -149,6 +149,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/api/v1/assets/:asset_id/evaporate", post(evaporate_asset))
         .route("/api/v1/assets/:asset_id/merge", post(merge_assets))
         .route("/api/v1/assets/:asset_id/split", post(split_asset))
+        .route("/api/v1/assets/estimate-gas", post(estimate_asset_gas))
         .route("/api/v1/economy/pools", get(get_liquidity_pools))
         .route("/api/v1/economy/pools", post(create_liquidity_pool))
         .route("/api/v1/economy/pools/:pool_id", get(get_liquidity_pool))
@@ -825,6 +826,50 @@ async fn split_asset(
         }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
     }
+}
+
+/// Estimate gas cost for asset operation
+#[derive(Debug, Deserialize)]
+pub struct EstimateGasRequest {
+    pub transaction: Transaction,
+}
+
+/// Gas estimate response
+#[derive(Debug, Serialize)]
+pub struct GasEstimateResponse {
+    pub gas_cost: u64,
+    pub gas_fee: u64,
+    pub gas_price: u64,
+}
+
+async fn estimate_asset_gas(
+    State(api_state): State<ApiState>,
+    Json(request): Json<EstimateGasRequest>,
+) -> ApiResult<Json<ApiResponse<GasEstimateResponse>>> {
+    let tx = request.transaction;
+    
+    // Extract asset operation data
+    let (action, data) = match &tx {
+        Transaction::MistbornAsset { action, data, .. } => (action, data),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    
+    // Calculate gas cost
+    let gas_cost = crate::assets::calculate_asset_operation_gas(
+        &api_state.config,
+        action,
+        data,
+        Some(&data.metadata),
+    );
+    
+    // Calculate gas fee (gas_cost * gas_price)
+    let gas_fee = gas_cost * api_state.config.vm.gas_price;
+    
+    Ok(Json(ApiResponse::success(GasEstimateResponse {
+        gas_cost,
+        gas_fee,
+        gas_price: api_state.config.vm.gas_price,
+    })))
 }
 
 /// Search assets

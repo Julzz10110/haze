@@ -608,6 +608,88 @@ impl MistbornAsset {
     }
 }
 
+/// Calculate gas cost for asset operations
+pub fn calculate_asset_operation_gas(
+    config: &crate::config::Config,
+    action: &AssetAction,
+    data: &AssetData,
+    additional_data: Option<&HashMap<String, String>>,
+) -> u64 {
+    let gas_config = &config.asset_gas;
+    
+    match action {
+        AssetAction::Create => {
+            let metadata_size: usize = data.metadata.values().map(|v| v.len()).sum();
+            let metadata_kb = (metadata_size as u64 + 1023) / 1024; // Round up
+            gas_config.create_base + (gas_config.create_per_kb * metadata_kb)
+        }
+        AssetAction::Update => {
+            let metadata_size: usize = data.metadata.values().map(|v| v.len()).sum();
+            let metadata_kb = (metadata_size as u64 + 1023) / 1024; // Round up
+            gas_config.update_base + (gas_config.update_per_kb * metadata_kb)
+        }
+        AssetAction::Condense => {
+            let metadata_size: usize = data.metadata.values().map(|v| v.len()).sum();
+            let metadata_kb = (metadata_size as u64 + 1023) / 1024; // Round up
+            
+            // Calculate density multiplier
+            let density_multiplier = match data.density {
+                DensityLevel::Light => 1,   // Ethereal -> Light
+                DensityLevel::Dense => 2,    // Light -> Dense
+                DensityLevel::Core => 5,     // Dense -> Core
+                DensityLevel::Ethereal => 1, // Shouldn't happen, but default to 1
+            };
+            
+            gas_config.condense_base * density_multiplier + (gas_config.condense_per_kb * metadata_kb)
+        }
+        AssetAction::Evaporate => {
+            gas_config.evaporate_base // Minimal cost for archiving
+        }
+        AssetAction::Merge => {
+            // Calculate combined size from current asset and other asset
+            let current_size: usize = data.metadata.values().map(|v| v.len()).sum();
+            
+            // Try to get other asset size from additional_data
+            let other_size = if let Some(additional) = additional_data {
+                if additional.get("_other_asset_id").is_some() {
+                    // We can't access the other asset here, so use a conservative estimate
+                    // based on current asset size
+                    current_size
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            
+            let combined_size = current_size + other_size;
+            let combined_kb = (combined_size as u64 + 1023) / 1024; // Round up
+            gas_config.merge_base + (gas_config.merge_per_kb * combined_kb)
+        }
+        AssetAction::Split => {
+            // Get number of components from additional_data
+            let component_count = if let Some(additional) = additional_data {
+                if let Some(components_str) = additional.get("_components") {
+                    components_str.split(',').filter(|s| !s.trim().is_empty()).count() as u64
+                } else {
+                    1 // Default to 1 if not specified
+                }
+            } else {
+                1
+            };
+            
+            // Estimate component size (split current asset size by component count)
+            let current_size: usize = data.metadata.values().map(|v| v.len()).sum();
+            let estimated_component_size = current_size / component_count.max(1) as usize;
+            let component_kb = (estimated_component_size as u64 + 1023) / 1024; // Round up
+            
+            gas_config.split_base 
+                + (gas_config.split_per_component * component_count)
+                + (gas_config.split_per_kb * component_kb * component_count)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

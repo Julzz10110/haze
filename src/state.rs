@@ -17,6 +17,7 @@ use hex;
 /// State manager for blockchain state
 pub struct StateManager {
     db: Arc<Db>,
+    config: Arc<Config>,
     accounts: Arc<DashMap<Address, AccountState>>,
     assets: Arc<DashMap<Hash, AssetState>>,
     blocks: Arc<DashMap<Hash, Block>>,
@@ -105,6 +106,7 @@ impl StateManager {
 
         Ok(Self {
             db: Arc::new(db),
+            config: Arc::new(config.clone()),
             accounts: Arc::new(DashMap::new()),
             assets: Arc::new(DashMap::new()),
             blocks: Arc::new(DashMap::new()),
@@ -480,6 +482,37 @@ impl StateManager {
                 let _remaining_fee = self.tokenomics.process_gas_fee(*fee)?;
             }
             Transaction::MistbornAsset { action, asset_id, data, .. } => {
+                // Calculate gas cost for this operation
+                let gas_cost = crate::assets::calculate_asset_operation_gas(
+                    &self.config,
+                    action,
+                    data,
+                    Some(&data.metadata),
+                );
+                
+                // Calculate gas fee (gas_cost * gas_price)
+                let gas_fee = gas_cost * self.config.vm.gas_price;
+                
+                // Check owner balance and deduct gas fee
+                let mut owner_account = self.accounts
+                    .entry(data.owner)
+                    .or_insert_with(|| AccountState {
+                        balance: 0,
+                        nonce: 0,
+                        staked: 0,
+                    });
+                
+                if owner_account.balance < gas_fee {
+                    return Err(HazeError::InvalidTransaction(
+                        format!("Insufficient balance for gas fee: need {}, have {}", gas_fee, owner_account.balance)
+                    ));
+                }
+                
+                owner_account.balance -= gas_fee;
+                
+                // Process gas fee (burn 50%)
+                let _remaining_fee = self.tokenomics.process_gas_fee(gas_fee)?;
+                
                 match action {
                     crate::types::AssetAction::Create => {
                         // Check if asset already exists
@@ -1285,6 +1318,7 @@ impl Clone for StateManager {
     fn clone(&self) -> Self {
         Self {
             db: self.db.clone(),
+            config: self.config.clone(),
             accounts: self.accounts.clone(),
             assets: self.assets.clone(),
             blocks: self.blocks.clone(),

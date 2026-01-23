@@ -36,6 +36,9 @@ pub struct Config {
     /// API configuration
     pub api: ApiConfig,
     
+    /// Asset operations gas costs configuration
+    pub asset_gas: AssetGasConfig,
+    
     /// Logging level
     pub log_level: String,
 }
@@ -111,6 +114,50 @@ pub struct StorageConfig {
     pub blob_chunk_size: usize,
 }
 
+/// Gas costs configuration for asset operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetGasConfig {
+    /// Base gas cost for creating an asset
+    pub create_base: u64,
+    
+    /// Gas cost per KB of metadata for create operation
+    pub create_per_kb: u64,
+    
+    /// Base gas cost for updating an asset
+    pub update_base: u64,
+    
+    /// Gas cost per KB of updated metadata
+    pub update_per_kb: u64,
+    
+    /// Base gas cost for condensing (increasing density)
+    pub condense_base: u64,
+    
+    /// Gas cost multiplier based on target density level
+    /// (Ethereal->Light: 1x, Light->Dense: 2x, Dense->Core: 5x)
+    pub condense_density_multiplier: u64,
+    
+    /// Gas cost per KB of new data for condense
+    pub condense_per_kb: u64,
+    
+    /// Base gas cost for evaporating (decreasing density)
+    pub evaporate_base: u64,
+    
+    /// Gas cost for merging assets (base)
+    pub merge_base: u64,
+    
+    /// Gas cost per KB of combined asset size
+    pub merge_per_kb: u64,
+    
+    /// Base gas cost for splitting an asset
+    pub split_base: u64,
+    
+    /// Gas cost per component created in split
+    pub split_per_component: u64,
+    
+    /// Gas cost per KB of component data
+    pub split_per_kb: u64,
+}
+
 impl Config {
     /// Load configuration from file or create default
     pub fn load() -> Result<Self> {
@@ -167,6 +214,21 @@ impl Config {
                 listen_addr: "127.0.0.1:8080".to_string(),
                 enable_cors: true,
                 enable_websocket: true,
+            },
+            asset_gas: AssetGasConfig {
+                create_base: 10_000,
+                create_per_kb: 100,
+                update_base: 5_000,
+                update_per_kb: 50,
+                condense_base: 15_000,
+                condense_density_multiplier: 1, // Base multiplier
+                condense_per_kb: 200,
+                evaporate_base: 2_000, // Minimal cost for archiving
+                merge_base: 20_000,
+                merge_per_kb: 150,
+                split_base: 15_000,
+                split_per_component: 5_000,
+                split_per_kb: 100,
             },
             log_level: "info".to_string(),
         }
