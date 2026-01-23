@@ -39,6 +39,9 @@ pub struct Config {
     /// Asset operations gas costs configuration
     pub asset_gas: AssetGasConfig,
     
+    /// Asset limits and quotas configuration
+    pub asset_limits: AssetLimits,
+    
     /// Logging level
     pub log_level: String,
 }
@@ -158,6 +161,54 @@ pub struct AssetGasConfig {
     pub split_per_kb: u64,
 }
 
+/// Asset limits and quotas configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetLimits {
+    /// Maximum number of assets per account (base limit)
+    pub max_assets_per_account: u64,
+    
+    /// Maximum metadata size per asset (bytes)
+    pub max_metadata_size: usize,
+    
+    /// Maximum number of blob files per asset
+    pub max_blob_files_per_asset: u64,
+    
+    /// Quotas for different node types
+    pub quotas: NodeQuotas,
+}
+
+/// Quotas for different node types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeQuotas {
+    /// Core node quotas (1000+ HAZE stake)
+    pub core: NodeQuota,
+    
+    /// Edge node quotas (100+ HAZE stake)
+    pub edge: NodeQuota,
+    
+    /// Light node quotas (no stake)
+    pub light: NodeQuota,
+    
+    /// Mobile node quotas
+    pub mobile: NodeQuota,
+}
+
+/// Quota configuration for a node type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeQuota {
+    /// Maximum assets per account
+    pub max_assets_per_account: u64,
+    
+    /// Maximum metadata size per asset (bytes)
+    pub max_metadata_size: usize,
+    
+    /// Maximum blob files per asset
+    pub max_blob_files_per_asset: u64,
+    
+    /// Maximum total blob storage per account (bytes)
+    pub max_blob_storage_per_account: u64,
+}
+
 impl Config {
     /// Load configuration from file or create default
     pub fn load() -> Result<Self> {
@@ -230,7 +281,49 @@ impl Config {
                 split_per_component: 5_000,
                 split_per_kb: 100,
             },
+            asset_limits: AssetLimits {
+                max_assets_per_account: 10_000,
+                max_metadata_size: 50 * 1024 * 1024, // 50MB (Core density max)
+                max_blob_files_per_asset: 100,
+                quotas: NodeQuotas {
+                    core: NodeQuota {
+                        max_assets_per_account: 100_000,
+                        max_metadata_size: 50 * 1024 * 1024, // 50MB
+                        max_blob_files_per_asset: 500,
+                        max_blob_storage_per_account: 10 * 1024 * 1024 * 1024, // 10GB
+                    },
+                    edge: NodeQuota {
+                        max_assets_per_account: 50_000,
+                        max_metadata_size: 50 * 1024 * 1024, // 50MB
+                        max_blob_files_per_asset: 200,
+                        max_blob_storage_per_account: 5 * 1024 * 1024 * 1024, // 5GB
+                    },
+                    light: NodeQuota {
+                        max_assets_per_account: 10_000,
+                        max_metadata_size: 5 * 1024 * 1024, // 5MB (Dense max)
+                        max_blob_files_per_asset: 100,
+                        max_blob_storage_per_account: 1 * 1024 * 1024 * 1024, // 1GB
+                    },
+                    mobile: NodeQuota {
+                        max_assets_per_account: 1_000,
+                        max_metadata_size: 50 * 1024, // 50KB (Light max)
+                        max_blob_files_per_asset: 10,
+                        max_blob_storage_per_account: 100 * 1024 * 1024, // 100MB
+                    },
+                },
+            },
             log_level: "info".to_string(),
+        }
+    }
+    
+    /// Get quota for current node type
+    pub fn get_node_quota(&self) -> &NodeQuota {
+        match self.network.node_type.as_str() {
+            "core" => &self.asset_limits.quotas.core,
+            "edge" => &self.asset_limits.quotas.edge,
+            "light" => &self.asset_limits.quotas.light,
+            "mobile" => &self.asset_limits.quotas.mobile,
+            _ => &self.asset_limits.quotas.light, // Default to light
         }
     }
 }

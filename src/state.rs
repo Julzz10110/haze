@@ -56,6 +56,18 @@ pub struct AssetVersion {
     pub blob_refs: HashMap<String, Hash>,
 }
 
+/// Quota usage information for an account
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QuotaUsage {
+    pub assets_count: u64,
+    pub assets_limit: u64,
+    pub blob_files_count: u64,
+    pub blob_files_limit: u64,
+    pub blob_storage_estimate: u64,
+    pub blob_storage_limit: u64,
+    pub metadata_size_limit: usize,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AssetState {
     pub owner: Address,
@@ -391,6 +403,157 @@ impl StateManager {
         results
     }
 
+    /// Check if account has reached asset limit
+    ///
+    /// # Arguments
+    /// * `owner` - Account address
+    ///
+    /// # Returns
+    /// `Ok(())` if within limits, `Err(HazeError)` if limit exceeded
+    fn check_asset_count_limit(&self, owner: &Address) -> Result<()> {
+        let quota = self.config.get_node_quota();
+        let current_count = self.search_assets_by_owner(owner).len() as u64;
+        
+        if current_count >= quota.max_assets_per_account {
+            return Err(HazeError::InvalidTransaction(
+                format!(
+                    "Asset limit exceeded: {} >= {} (node type: {})",
+                    current_count,
+                    quota.max_assets_per_account,
+                    self.config.network.node_type
+                )
+            ));
+        }
+        
+        Ok(())
+    }
+
+    /// Check if metadata size is within limits
+    ///
+    /// # Arguments
+    /// * `metadata_size` - Size of metadata in bytes
+    ///
+    /// # Returns
+    /// `Ok(())` if within limits, `Err(HazeError)` if limit exceeded
+    fn check_metadata_size_limit(&self, metadata_size: usize) -> Result<()> {
+        let quota = self.config.get_node_quota();
+        
+        if metadata_size > quota.max_metadata_size {
+            return Err(HazeError::AssetSizeExceeded(
+                metadata_size,
+                quota.max_metadata_size
+            ));
+        }
+        
+        Ok(())
+    }
+
+    /// Check if asset has reached blob file limit
+    ///
+    /// # Arguments
+    /// * `asset_id` - Asset identifier
+    /// * `additional_blobs` - Number of additional blob files to add
+    ///
+    /// # Returns
+    /// `Ok(())` if within limits, `Err(HazeError)` if limit exceeded
+    fn check_blob_files_limit(&self, asset_id: &Hash, additional_blobs: u64) -> Result<()> {
+        let quota = self.config.get_node_quota();
+        
+        let current_blob_count = if let Some(asset_state) = self.assets.get(asset_id) {
+            asset_state.blob_refs.len() as u64
+        } else {
+            0
+        };
+        
+        let new_blob_count = current_blob_count + additional_blobs;
+        
+        if new_blob_count > quota.max_blob_files_per_asset {
+            return Err(HazeError::InvalidTransaction(
+                format!(
+                    "Blob files limit exceeded: {} > {} (node type: {})",
+                    new_blob_count,
+                    quota.max_blob_files_per_asset,
+                    self.config.network.node_type
+                )
+            ));
+        }
+        
+        Ok(())
+    }
+
+    /// Check if account has reached blob storage limit
+    ///
+    /// # Arguments
+    /// * `owner` - Account address
+    /// * `additional_size` - Additional blob storage size in bytes
+    ///
+    /// # Returns
+    /// `Ok(())` if within limits, `Err(HazeError)` if limit exceeded
+    fn check_blob_storage_limit(&self, owner: &Address, additional_size: u64) -> Result<()> {
+        let quota = self.config.get_node_quota();
+        
+        // Calculate current blob storage for this account
+        let mut current_storage: u64 = 0;
+        let owner_assets = self.search_assets_by_owner(owner);
+        
+        for asset_id in &owner_assets {
+            if let Some(asset_state) = self.assets.get(asset_id) {
+                // Estimate blob storage size (we don't have exact sizes, so use blob count * average)
+                // This is a conservative estimate
+                let blob_count = asset_state.blob_refs.len() as u64;
+                current_storage += blob_count * 1024 * 1024; // Estimate 1MB per blob
+            }
+        }
+        
+        let new_storage = current_storage + additional_size;
+        
+        if new_storage > quota.max_blob_storage_per_account {
+            return Err(HazeError::InvalidTransaction(
+                format!(
+                    "Blob storage limit exceeded: {} > {} bytes (node type: {})",
+                    new_storage,
+                    quota.max_blob_storage_per_account,
+                    self.config.network.node_type
+                )
+            ));
+        }
+        
+        Ok(())
+    }
+
+    /// Get quota usage for an account
+    ///
+    /// # Arguments
+    /// * `owner` - Account address
+    ///
+    /// # Returns
+    /// Quota usage information
+    pub fn get_quota_usage(&self, owner: &Address) -> QuotaUsage {
+        let quota = self.config.get_node_quota();
+        let owner_assets = self.search_assets_by_owner(owner);
+        
+        let mut total_blob_files = 0;
+        let mut total_blob_storage_estimate = 0u64;
+        
+        for asset_id in &owner_assets {
+            if let Some(asset_state) = self.assets.get(asset_id) {
+                let blob_count = asset_state.blob_refs.len() as u64;
+                total_blob_files += blob_count;
+                total_blob_storage_estimate += blob_count * 1024 * 1024; // Estimate 1MB per blob
+            }
+        }
+        
+        QuotaUsage {
+            assets_count: owner_assets.len() as u64,
+            assets_limit: quota.max_assets_per_account,
+            blob_files_count: total_blob_files,
+            blob_files_limit: quota.max_blob_files_per_asset, // Per asset, but we show total
+            blob_storage_estimate: total_blob_storage_estimate,
+            blob_storage_limit: quota.max_blob_storage_per_account,
+            metadata_size_limit: quota.max_metadata_size,
+        }
+    }
+
     /// Get block by hash
     pub fn get_block(&self, hash: &Hash) -> Option<Block> {
         self.blocks.get(hash).map(|v| v.clone())
@@ -522,14 +685,22 @@ impl StateManager {
                             ));
                         }
                         
+                        // Check asset count limit for owner
+                        self.check_asset_count_limit(&data.owner)?;
+                        
                         // Validate metadata size
                         let metadata_size: usize = data.metadata.values().map(|v| v.len()).sum();
+                        
+                        // Check against density limit
                         if metadata_size > data.density.max_size() {
                             return Err(HazeError::AssetSizeExceeded(
                                 metadata_size,
                                 data.density.max_size()
                             ));
                         }
+                        
+                        // Check against node quota limit
+                        self.check_metadata_size_limit(metadata_size)?;
                         
                         // Validate metadata keys (no empty keys, reasonable length)
                         for (key, value) in &data.metadata {
@@ -632,12 +803,17 @@ impl StateManager {
                             .map(|(_, v)| v.len())
                             .sum();
                         
-                        if current_size + new_metadata_size > asset_state.data.density.max_size() {
+                        let total_metadata_size = current_size + new_metadata_size;
+                        
+                        if total_metadata_size > asset_state.data.density.max_size() {
                             return Err(HazeError::AssetSizeExceeded(
-                                current_size + new_metadata_size,
+                                total_metadata_size,
                                 asset_state.data.density.max_size()
                             ));
                         }
+                        
+                        // Check against node quota limit
+                        self.check_metadata_size_limit(total_metadata_size)?;
                         
                         // Validate metadata keys
                         for (key, value) in &data.metadata {
@@ -802,6 +978,9 @@ impl StateManager {
                             ));
                         }
                         
+                        // Check against node quota limit
+                        self.check_metadata_size_limit(new_metadata_size)?;
+                        
                         // Update density and merge new data
                         let new_density_str = format!("{:?}", data.density);
                         let old_density = asset_state.data.density;
@@ -810,6 +989,15 @@ impl StateManager {
                         // Process blob_refs from metadata (special key "_blob_refs" as JSON)
                         if let Some(blob_refs_json) = data.metadata.get("_blob_refs") {
                             if let Ok(blob_refs_map) = serde_json::from_str::<HashMap<String, String>>(blob_refs_json) {
+                                let new_blob_refs_count = blob_refs_map.len() as u64;
+                                
+                                // Check blob files limit
+                                self.check_blob_files_limit(asset_id, new_blob_refs_count)?;
+                                
+                                // Estimate blob storage size (conservative: 1MB per blob)
+                                let estimated_blob_size = new_blob_refs_count * 1024 * 1024;
+                                self.check_blob_storage_limit(&data.owner, estimated_blob_size)?;
+                                
                                 for (key, hash_hex) in blob_refs_map {
                                     if let Ok(hash_bytes) = hex::decode(&hash_hex) {
                                         if hash_bytes.len() == 32 {
@@ -1401,6 +1589,8 @@ mod tests {
         let state_manager = StateManager::new(&config).unwrap();
         
         let owner = create_test_address(1);
+        // Create account with balance for gas fees
+        state_manager.create_test_account(owner, 100_000, 0);
         
         // Create first asset
         let asset_id_1 = crate::types::sha256(b"asset1");
@@ -1497,6 +1687,9 @@ mod tests {
         
         let owner1 = create_test_address(1);
         let owner2 = create_test_address(2);
+        // Create accounts with balance for gas fees
+        state_manager.create_test_account(owner1, 100_000, 0);
+        state_manager.create_test_account(owner2, 100_000, 0);
         
         // Create first asset
         let asset_id_1 = crate::types::sha256(b"asset1");
@@ -1564,6 +1757,8 @@ mod tests {
         let state_manager = StateManager::new(&config).unwrap();
         
         let owner = create_test_address(1);
+        // Create account with balance for gas fees
+        state_manager.create_test_account(owner, 100_000, 0);
         
         // Create asset with multiple components
         let asset_id = crate::types::sha256(b"composite_asset");
@@ -1642,6 +1837,9 @@ mod tests {
         
         let owner1 = create_test_address(1);
         let owner2 = create_test_address(2);
+        // Create accounts with balance for gas fees
+        state_manager.create_test_account(owner1, 100_000, 0);
+        state_manager.create_test_account(owner2, 100_000, 0);
         
         // Create asset
         let asset_id = crate::types::sha256(b"asset");
@@ -1695,6 +1893,9 @@ mod tests {
         let state_manager = StateManager::new(&config).unwrap();
         
         let owner = create_test_address(1);
+        // Create account with balance for gas fees
+        state_manager.create_test_account(owner, 100_000, 0);
+        
         let asset_id = crate::types::sha256(b"test_asset");
         
         // Create asset
@@ -1726,6 +1927,9 @@ mod tests {
         
         let owner1 = create_test_address(1);
         let owner2 = create_test_address(2);
+        // Create accounts with balance for gas fees
+        state_manager.create_test_account(owner1, 100_000, 0);
+        state_manager.create_test_account(owner2, 100_000, 0);
         
         // Create assets for owner1
         for i in 0..3 {
@@ -1772,6 +1976,8 @@ mod tests {
         let state_manager = StateManager::new(&config).unwrap();
         
         let owner = create_test_address(1);
+        // Create account with balance for gas fees
+        state_manager.create_test_account(owner, 100_000, 0);
         
         // Create assets with game_id
         for i in 0..2 {
@@ -1802,6 +2008,9 @@ mod tests {
         let state_manager = StateManager::new(&config).unwrap();
         
         let owner = create_test_address(1);
+        // Create account with balance for gas fees
+        state_manager.create_test_account(owner, 100_000, 0);
+        
         let asset_id = crate::types::sha256(b"test_asset");
         
         // Create asset
@@ -1857,6 +2066,9 @@ mod tests {
         let state_manager = StateManager::new(&config).unwrap();
         
         let owner = create_test_address(1);
+        // Create account with balance for gas fees
+        state_manager.create_test_account(owner, 100_000, 0);
+        
         let asset_id = crate::types::sha256(b"test_asset");
         
         // Create asset
