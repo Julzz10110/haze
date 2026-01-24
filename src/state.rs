@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use parking_lot::RwLock;
 use sled::Db;
 use tokio::sync::broadcast;
-use crate::types::{Address, Hash, Block, Transaction, AssetAction};
+use crate::types::{Address, Hash, Block, Transaction, AssetAction, AssetPermission, PermissionLevel};
 use crate::config::Config;
 use crate::error::{HazeError, Result};
 use crate::tokenomics::Tokenomics;
@@ -90,6 +90,12 @@ pub struct AssetState {
     /// Current version number (increments on each snapshot)
     #[serde(default)]
     pub current_version: u64,
+    /// Permission grants (GameContract, PublicRead)
+    #[serde(default)]
+    pub permissions: Vec<AssetPermission>,
+    /// If true, anyone can read the asset
+    #[serde(default)]
+    pub public_read: bool,
 }
 
 impl StateManager {
@@ -397,7 +403,14 @@ impl StateManager {
             ))?;
         
         Self::add_asset_snapshot(&mut asset_state);
-        Ok(asset_state.current_version)
+        let version = asset_state.current_version;
+        let owner = asset_state.owner;
+        self.broadcast_event(WsEvent::AssetVersionCreated {
+            asset_id: hex::encode(asset_id),
+            version,
+            owner: hex::encode(owner),
+        });
+        Ok(version)
     }
 
     /// Search assets by owner
@@ -596,6 +609,40 @@ impl StateManager {
         }
         
         Ok(())
+    }
+
+    /// Check if caller has write permission for an asset (Update, Condense, Evaporate, Merge, Split).
+    /// Owner always has full access. GameContract grantees have limited access when game_id matches.
+    fn check_asset_write_permission(
+        &self,
+        asset_state: &AssetState,
+        caller: &Address,
+    ) -> Result<()> {
+        if asset_state.owner == *caller {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().timestamp();
+        for p in &asset_state.permissions {
+            if p.grantee != *caller {
+                continue;
+            }
+            if p.level != PermissionLevel::GameContract {
+                continue;
+            }
+            if let Some(ref exp) = p.expires_at {
+                if now > *exp {
+                    continue;
+                }
+            }
+            match (&p.game_id, &asset_state.data.game_id) {
+                (Some(perm_gid), Some(asset_gid)) if perm_gid == asset_gid => return Ok(()),
+                (None, _) => return Ok(()), // No game restriction: allow any game
+                _ => {}
+            }
+        }
+        Err(HazeError::AccessDenied(
+            "Caller is not owner and has no GameContract permission".to_string(),
+        ))
     }
 
     /// Get quota usage for an account
@@ -833,6 +880,8 @@ impl StateManager {
                             history: Vec::new(),
                             versions: Vec::new(),
                             current_version: 0,
+                            permissions: Vec::new(),
+                            public_read: false,
                         };
                         
                         // Remove special metadata keys before storing
@@ -863,12 +912,7 @@ impl StateManager {
                             ))?
                             .clone();
                         
-                        // Verify ownership
-                        if asset_state.owner != data.owner {
-                            return Err(HazeError::AccessDenied(
-                                "Asset ownership mismatch".to_string()
-                            ));
-                        }
+                        self.check_asset_write_permission(&asset_state, &data.owner)?;
                         
                         // Save owner before moving asset_state
                         let owner = asset_state.owner;
@@ -958,6 +1002,15 @@ impl StateManager {
                             .collect();
                         Self::add_asset_history(&mut asset_state, crate::types::AssetAction::Update, changes);
                         
+                        let attr_names: Vec<String> = asset_state.data.attributes.iter().map(|a| a.name.clone()).collect();
+                        if !attr_names.is_empty() {
+                            self.broadcast_event(WsEvent::AssetAttributeUpdated {
+                                asset_id: hex::encode(asset_id),
+                                owner: hex::encode(owner),
+                                attributes: attr_names,
+                            });
+                        }
+                        
                         // Update indexes if needed
                         let new_game_id = asset_state.data.game_id.clone();
                         let new_density = asset_state.data.density as u8;
@@ -1005,12 +1058,7 @@ impl StateManager {
                             ))?
                             .clone();
                         
-                        // Verify ownership
-                        if asset_state.owner != data.owner {
-                            return Err(HazeError::AccessDenied(
-                                "Asset ownership mismatch".to_string()
-                            ));
-                        }
+                        self.check_asset_write_permission(&asset_state, &data.owner)?;
                         
                         // Check if condensation is valid (can only increase density by one level)
                         let current_density = asset_state.data.density as u8;
@@ -1138,12 +1186,7 @@ impl StateManager {
                             ))?
                             .clone();
                         
-                        // Verify ownership
-                        if asset_state.owner != data.owner {
-                            return Err(HazeError::AccessDenied(
-                                "Asset ownership mismatch".to_string()
-                            ));
-                        }
+                        self.check_asset_write_permission(&asset_state, &data.owner)?;
                         
                         // Check if evaporation is valid (can only decrease density by one level)
                         let current_density = asset_state.data.density as u8;
@@ -1243,12 +1286,12 @@ impl StateManager {
                             ))?
                             .clone();
                         
-                        // Verify both assets have the same owner
-                        if asset_state.owner != other_asset_state.owner || asset_state.owner != data.owner {
+                        if asset_state.owner != other_asset_state.owner {
                             return Err(HazeError::AccessDenied(
                                 "Cannot merge assets with different owners".to_string()
                             ));
                         }
+                        self.check_asset_write_permission(&asset_state, &data.owner)?;
                         
                         // Validate merged size won't exceed Core density limit
                         let current_size: usize = asset_state.data.metadata.values().map(|v| v.len()).sum();
@@ -1380,12 +1423,7 @@ impl StateManager {
                             ))?
                             .clone();
                         
-                        // Verify ownership
-                        if source_asset_state.owner != data.owner {
-                            return Err(HazeError::AccessDenied(
-                                "Asset ownership mismatch".to_string()
-                            ));
-                        }
+                        self.check_asset_write_permission(&source_asset_state, &data.owner)?;
                         
                         // Validate component count (reasonable limit)
                         if components.len() > 100 {
@@ -1447,6 +1485,8 @@ impl StateManager {
                                 history: Vec::new(),
                                 versions: Vec::new(),
                                 current_version: 0,
+                                permissions: Vec::new(),
+                                public_read: false,
                             };
                             
                             // Add creation to history
@@ -1505,6 +1545,24 @@ impl StateManager {
                 
                 // Register stake in tokenomics
                 self.tokenomics.stake(*validator, *validator, *amount)?;
+            }
+            Transaction::SetAssetPermissions { asset_id, permissions, public_read, owner, .. } => {
+                let mut asset_state = self.assets.get(asset_id)
+                    .ok_or_else(|| HazeError::InvalidTransaction("Asset not found".to_string()))?
+                    .clone();
+                if asset_state.owner != *owner {
+                    return Err(HazeError::AccessDenied(
+                        "Only asset owner can set permissions".to_string()
+                    ));
+                }
+                asset_state.permissions = permissions.clone();
+                asset_state.public_read = *public_read;
+                asset_state.updated_at = chrono::Utc::now().timestamp();
+                self.assets.insert(*asset_id, asset_state);
+                self.broadcast_event(WsEvent::AssetPermissionChanged {
+                    asset_id: hex::encode(asset_id),
+                    owner: hex::encode(owner),
+                });
             }
             _ => {
                 // Contract calls handled by VM
@@ -2018,7 +2076,12 @@ mod tests {
         
         let result = state_manager.apply_transaction(&split_tx);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("ownership mismatch"));
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not owner") || err_msg.contains("Access denied"),
+            "expected permission error, got: {}",
+            err_msg
+        );
         
         // Asset should still exist
         assert!(state_manager.get_asset(&asset_id).is_some());

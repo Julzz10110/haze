@@ -288,6 +288,14 @@ impl ConsensusEngine {
                 // Validate asset data
                 self.validate_asset_data(data)?;
             }
+            Transaction::SetAssetPermissions { owner, signature, .. } => {
+                if signature.is_empty() {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        "Transaction signature is empty".to_string()
+                    ));
+                }
+                self.verify_transaction_signature(tx, owner)?;
+            }
         }
 
         Ok(())
@@ -303,6 +311,7 @@ impl ConsensusEngine {
             Transaction::Stake { signature, .. } => signature,
             Transaction::ContractCall { signature, .. } => signature,
             Transaction::MistbornAsset { signature, .. } => signature,
+            Transaction::SetAssetPermissions { signature, .. } => signature,
         };
 
         // Get transaction data for signing (transaction without signature field)
@@ -565,6 +574,17 @@ impl ConsensusEngine {
                 }
                 
                 serialized
+            }
+            Transaction::SetAssetPermissions { asset_id, permissions, public_read, owner, .. } => {
+                let mut data = Vec::new();
+                data.extend_from_slice(b"SetAssetPermissions");
+                data.extend_from_slice(asset_id);
+                data.extend_from_slice(owner);
+                data.push(if *public_read { 1 } else { 0 });
+                let perm_bytes = bincode::serialize(permissions).unwrap_or_default();
+                data.extend_from_slice(&(perm_bytes.len() as u32).to_le_bytes());
+                data.extend_from_slice(&perm_bytes);
+                data
             }
         }
     }

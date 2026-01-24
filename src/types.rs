@@ -95,6 +95,14 @@ pub enum Transaction {
         amount: u64,
         signature: Vec<u8>,
     },
+    /// Set asset permissions (owner only)
+    SetAssetPermissions {
+        asset_id: Hash,
+        permissions: Vec<AssetPermission>,
+        public_read: bool,
+        owner: Address,
+        signature: Vec<u8>,
+    },
 }
 
 /// Actions for Mistborn assets
@@ -144,6 +152,28 @@ pub struct Attribute {
     pub name: String,
     pub value: String,
     pub rarity: Option<f64>,
+}
+
+/// Permission level for asset access (granted to non-owners)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionLevel {
+    /// Limited access: asset operations allowed only for matching game_id
+    GameContract,
+    /// Read-only access
+    PublicRead,
+}
+
+/// Permission grant for an asset
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetPermission {
+    /// Address that receives the permission
+    pub grantee: Address,
+    /// Permission level
+    pub level: PermissionLevel,
+    /// For GameContract: restricts access to this game_id only
+    pub game_id: Option<String>,
+    /// Optional expiration timestamp (Unix seconds)
+    pub expires_at: Option<i64>,
 }
 
 /// Transaction hash

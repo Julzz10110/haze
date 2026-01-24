@@ -22,7 +22,7 @@ use tokio::sync::broadcast;
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
-use crate::types::{Transaction, AssetAction, Hash};
+use crate::types::{Transaction, AssetAction, Hash, AssetPermission, PermissionLevel, Address};
 use crate::state::AssetState;
 pub use crate::ws_events::WsEvent;
 
@@ -150,6 +150,10 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/api/v1/assets/:asset_id/merge", post(merge_assets))
         .route("/api/v1/assets/:asset_id/split", post(split_asset))
         .route("/api/v1/assets/estimate-gas", post(estimate_asset_gas))
+        .route("/api/v1/assets/:asset_id/permissions", get(get_asset_permissions))
+        .route("/api/v1/assets/:asset_id/permissions", post(set_asset_permissions))
+        .route("/api/v1/assets/:asset_id/export", get(export_asset))
+        .route("/api/v1/assets/import", post(import_asset))
         .route("/api/v1/economy/pools", get(get_liquidity_pools))
         .route("/api/v1/economy/pools", post(create_liquidity_pool))
         .route("/api/v1/economy/pools/:pool_id", get(get_liquidity_pool))
@@ -398,6 +402,14 @@ async fn get_asset(
             .map(|(k, v)| (k.clone(), hex::encode(v)))
             .collect();
         
+        let permissions_json: Vec<serde_json::Value> = asset_state.permissions.iter().map(|p| {
+            serde_json::json!({
+                "grantee": hex::encode(p.grantee),
+                "level": format!("{:?}", p.level),
+                "game_id": p.game_id,
+                "expires_at": p.expires_at,
+            })
+        }).collect();
         let asset_json = serde_json::json!({
             "asset_id": hex::encode(asset_id),
             "owner": hex::encode(asset_state.owner),
@@ -409,6 +421,8 @@ async fn get_asset(
             "updated_at": asset_state.updated_at,
             "blob_refs": blob_refs_json,
             "history_count": asset_state.history.len(),
+            "permissions": permissions_json,
+            "public_read": asset_state.public_read,
         });
         Ok(Json(ApiResponse::success(asset_json)))
     } else {
@@ -872,6 +886,275 @@ async fn estimate_asset_gas(
     })))
 }
 
+/// Get asset permissions
+async fn get_asset_permissions(
+    State(api_state): State<ApiState>,
+    Path(asset_id_str): Path<String>,
+) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let asset_id_bytes = hex::decode(&asset_id_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut asset_id = [0u8; 32];
+    asset_id.copy_from_slice(&asset_id_bytes);
+
+    if let Some(asset_state) = api_state.state.get_asset(&asset_id) {
+        let permissions_json: Vec<serde_json::Value> = asset_state.permissions.iter().map(|p| {
+            serde_json::json!({
+                "grantee": hex::encode(p.grantee),
+                "level": format!("{:?}", p.level),
+                "game_id": p.game_id,
+                "expires_at": p.expires_at,
+            })
+        }).collect();
+        let response = serde_json::json!({
+            "asset_id": hex::encode(asset_id),
+            "owner": hex::encode(asset_state.owner),
+            "permissions": permissions_json,
+            "public_read": asset_state.public_read,
+        });
+        Ok(Json(ApiResponse::success(response)))
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+/// Permission DTO for API (grantee as hex string)
+#[derive(Debug, Deserialize)]
+pub struct PermissionDto {
+    pub grantee: String,
+    pub level: String,
+    pub game_id: Option<String>,
+    pub expires_at: Option<i64>,
+}
+
+/// Set asset permissions request
+#[derive(Debug, Deserialize)]
+pub struct SetPermissionsRequest {
+    pub permissions: Vec<PermissionDto>,
+    pub public_read: bool,
+    /// Owner address (hex string)
+    pub owner: String,
+    pub signature: Vec<u8>,
+}
+
+/// Set asset permissions (owner only)
+async fn set_asset_permissions(
+    State(api_state): State<ApiState>,
+    Path(asset_id_str): Path<String>,
+    Json(req): Json<SetPermissionsRequest>,
+) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
+    let asset_id_bytes = hex::decode(&asset_id_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut asset_id = [0u8; 32];
+    asset_id.copy_from_slice(&asset_id_bytes);
+
+    let owner_bytes = hex::decode(&req.owner).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if owner_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut owner = [0u8; 32];
+    owner.copy_from_slice(&owner_bytes);
+
+    if api_state.state.get_asset(&asset_id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if req.signature.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut permissions = Vec::with_capacity(req.permissions.len());
+    for p in req.permissions {
+        let grantee_bytes = hex::decode(&p.grantee).map_err(|_| StatusCode::BAD_REQUEST)?;
+        if grantee_bytes.len() != 32 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let mut grantee: Address = [0u8; 32];
+        grantee.copy_from_slice(&grantee_bytes);
+        let level = match p.level.as_str() {
+            "GameContract" => PermissionLevel::GameContract,
+            "PublicRead" => PermissionLevel::PublicRead,
+            _ => return Err(StatusCode::BAD_REQUEST),
+        };
+        permissions.push(AssetPermission {
+            grantee,
+            level,
+            game_id: p.game_id,
+            expires_at: p.expires_at,
+        });
+    }
+
+    let tx = Transaction::SetAssetPermissions {
+        asset_id,
+        permissions,
+        public_read: req.public_read,
+        owner,
+        signature: req.signature,
+    };
+    let tx_hash = tx.hash();
+    match api_state.consensus.add_transaction(tx) {
+        Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
+            hash: hex::encode(tx_hash),
+            status: "pending".to_string(),
+        }))),
+        Err(_) => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+/// Export asset as JSON (full state: metadata, attributes, blob_refs, history, versions, permissions)
+async fn export_asset(
+    State(api_state): State<ApiState>,
+    Path(asset_id_str): Path<String>,
+) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
+    let asset_id_bytes = hex::decode(&asset_id_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut asset_id = [0u8; 32];
+    asset_id.copy_from_slice(&asset_id_bytes);
+
+    let asset_state = api_state.state.get_asset(&asset_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let blob_refs_json: std::collections::HashMap<String, String> = asset_state
+        .blob_refs
+        .iter()
+        .map(|(k, v)| (k.clone(), hex::encode(v)))
+        .collect();
+    let permissions_json: Vec<serde_json::Value> = asset_state
+        .permissions
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "grantee": hex::encode(p.grantee),
+                "level": format!("{:?}", p.level),
+                "game_id": p.game_id,
+                "expires_at": p.expires_at,
+            })
+        })
+        .collect();
+    let history_json: Vec<serde_json::Value> = asset_state
+        .history
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "timestamp": e.timestamp,
+                "action": format!("{:?}", e.action),
+                "changes": e.changes,
+            })
+        })
+        .collect();
+    let versions_json: Vec<serde_json::Value> = asset_state
+        .versions
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "version": v.version,
+                "timestamp": v.timestamp,
+            })
+        })
+        .collect();
+
+    let export_json = serde_json::json!({
+        "asset_id": hex::encode(asset_id),
+        "owner": hex::encode(asset_state.owner),
+        "density": format!("{:?}", asset_state.data.density),
+        "metadata": asset_state.data.metadata,
+        "attributes": asset_state.data.attributes,
+        "game_id": asset_state.data.game_id,
+        "created_at": asset_state.created_at,
+        "updated_at": asset_state.updated_at,
+        "blob_refs": blob_refs_json,
+        "history": history_json,
+        "versions": versions_json,
+        "current_version": asset_state.current_version,
+        "permissions": permissions_json,
+        "public_read": asset_state.public_read,
+    });
+    Ok(Json(ApiResponse::success(export_json)))
+}
+
+/// Import asset request (export-like JSON + signature for Create tx)
+#[derive(Debug, Deserialize)]
+pub struct ImportAssetRequest {
+    pub asset_id: String,
+    pub owner: String,
+    pub density: String,
+    pub metadata: std::collections::HashMap<String, String>,
+    pub attributes: Vec<crate::types::Attribute>,
+    pub game_id: Option<String>,
+    #[serde(default)]
+    pub blob_refs: std::collections::HashMap<String, String>,
+    /// Signature hex string
+    pub signature: String,
+}
+
+/// Import asset from JSON (creates asset via Create transaction)
+async fn import_asset(
+    State(api_state): State<ApiState>,
+    Json(req): Json<ImportAssetRequest>,
+) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
+    let asset_id_bytes = hex::decode(&req.asset_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if asset_id_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut asset_id = [0u8; 32];
+    asset_id.copy_from_slice(&asset_id_bytes);
+
+    let owner_bytes = hex::decode(&req.owner).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if owner_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut owner = [0u8; 32];
+    owner.copy_from_slice(&owner_bytes);
+
+    if api_state.state.get_asset(&asset_id).is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
+    let signature = hex::decode(&req.signature).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if signature.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let density = match req.density.as_str() {
+        "Ethereal" => crate::types::DensityLevel::Ethereal,
+        "Light" => crate::types::DensityLevel::Light,
+        "Dense" => crate::types::DensityLevel::Dense,
+        "Core" => crate::types::DensityLevel::Core,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    let mut metadata = req.metadata;
+    if !req.blob_refs.is_empty() {
+        let blob_refs_json = serde_json::to_string(&req.blob_refs).map_err(|_| StatusCode::BAD_REQUEST)?;
+        metadata.insert("_blob_refs".to_string(), blob_refs_json);
+    }
+
+    let data = crate::types::AssetData {
+        density,
+        metadata,
+        attributes: req.attributes,
+        game_id: req.game_id,
+        owner,
+    };
+
+    let tx = Transaction::MistbornAsset {
+        action: AssetAction::Create,
+        asset_id,
+        data,
+        signature,
+    };
+    let tx_hash = tx.hash();
+    match api_state.consensus.add_transaction(tx) {
+        Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
+            hash: hex::encode(tx_hash),
+            status: "pending".to_string(),
+        }))),
+        Err(_) => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
 /// Search assets
 async fn search_assets(
     State(api_state): State<ApiState>,
@@ -1124,6 +1407,18 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: ApiState) {
                     }
                     ("asset_split", WsEvent::AssetSplit { asset_id, .. }) => {
                         sub.asset_id.as_ref().map(|id| id == asset_id).unwrap_or(true)
+                    }
+                    ("asset_permission_changed", WsEvent::AssetPermissionChanged { asset_id, owner, .. }) => {
+                        sub.asset_id.as_ref().map(|id| id == asset_id).unwrap_or(true) &&
+                        sub.owner.as_ref().map(|o| o == owner).unwrap_or(true)
+                    }
+                    ("asset_attribute_updated", WsEvent::AssetAttributeUpdated { asset_id, owner, .. }) => {
+                        sub.asset_id.as_ref().map(|id| id == asset_id).unwrap_or(true) &&
+                        sub.owner.as_ref().map(|o| o == owner).unwrap_or(true)
+                    }
+                    ("asset_version_created", WsEvent::AssetVersionCreated { asset_id, owner, .. }) => {
+                        sub.asset_id.as_ref().map(|id| id == asset_id).unwrap_or(true) &&
+                        sub.owner.as_ref().map(|o| o == owner).unwrap_or(true)
                     }
                     _ => false,
                 }

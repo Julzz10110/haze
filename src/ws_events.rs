@@ -40,6 +40,23 @@ pub enum WsEvent {
         asset_id: String,
         created_assets: Vec<String>,
     },
+    #[serde(rename = "asset_permission_changed")]
+    AssetPermissionChanged {
+        asset_id: String,
+        owner: String,
+    },
+    #[serde(rename = "asset_attribute_updated")]
+    AssetAttributeUpdated {
+        asset_id: String,
+        owner: String,
+        attributes: Vec<String>,
+    },
+    #[serde(rename = "asset_version_created")]
+    AssetVersionCreated {
+        asset_id: String,
+        version: u64,
+        owner: String,
+    },
     #[serde(rename = "error")]
     Error { message: String },
 }
