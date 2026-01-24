@@ -56,3 +56,7 @@ bytes = "1.5"
 axum = { version = "0.7", features = ["ws", "macros"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+[dev-dependencies]
+bytes = "1.5"
+tower = { version = "0.4", features = ["util"] }

@@ -1290,6 +1290,29 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_set_asset_permissions_empty_signature() {
+        let config = create_test_config("set_perms_empty_sig");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+
+        let owner = create_test_address_for_asset(1);
+        let asset_id = crate::types::sha256(b"perm_asset");
+
+        let tx = Transaction::SetAssetPermissions {
+            asset_id,
+            permissions: vec![],
+            public_read: false,
+            owner,
+            signature: vec![], // Empty signature
+        };
+
+        let result = consensus.add_transaction(tx);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("empty") || err.contains("signature"));
+    }
+
+    #[test]
     fn test_nonce_validation_new_account() {
         let config = create_test_config("nonce_new");
         let state = crate::state::StateManager::new(&config).unwrap();

@@ -2316,4 +2316,277 @@ mod tests {
         let sorted_versions: Vec<u64> = versions.iter().map(|v| v.version).collect();
         assert_eq!(sorted_versions, vec![1, 2]);
     }
+
+    #[test]
+    fn test_create_asset() {
+        let config = create_test_config("create_only");
+        let state_manager = StateManager::new(&config).unwrap();
+        let owner = create_test_address(1);
+        state_manager.create_test_account(owner, 100_000, 0);
+
+        let asset_id = crate::types::sha256(b"create_test");
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("name".to_string(), "Test Asset".to_string());
+
+        let tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: meta,
+                attributes: vec![],
+                game_id: Some("g1".to_string()),
+                owner,
+            },
+            signature: vec![1; 64],
+        };
+        state_manager.apply_transaction(&tx).unwrap();
+
+        let asset = state_manager.get_asset(&asset_id).unwrap();
+        assert_eq!(asset.owner, owner);
+        assert_eq!(asset.data.density, crate::types::DensityLevel::Ethereal);
+        assert_eq!(asset.data.metadata.get("name"), Some(&"Test Asset".to_string()));
+        assert_eq!(asset.data.game_id, Some("g1".to_string()));
+    }
+
+    #[test]
+    fn test_evaporate_asset() {
+        let config = create_test_config("evaporate");
+        let state_manager = StateManager::new(&config).unwrap();
+        let owner = create_test_address(1);
+        state_manager.create_test_account(owner, 100_000, 0);
+
+        let asset_id = crate::types::sha256(b"evap_asset");
+        let create_tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Light,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![1; 64],
+        };
+        state_manager.apply_transaction(&create_tx).unwrap();
+        assert_eq!(state_manager.get_asset(&asset_id).unwrap().data.density, crate::types::DensityLevel::Light);
+
+        let evap_tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Evaporate,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![2; 64],
+        };
+        state_manager.apply_transaction(&evap_tx).unwrap();
+
+        let asset = state_manager.get_asset(&asset_id).unwrap();
+        assert_eq!(asset.data.density, crate::types::DensityLevel::Ethereal);
+    }
+
+    #[test]
+    fn test_metadata_size_exceeded() {
+        let config = create_test_config("meta_size");
+        let state_manager = StateManager::new(&config).unwrap();
+        let owner = create_test_address(1);
+        state_manager.create_test_account(owner, 100_000, 0);
+
+        let asset_id = crate::types::sha256(b"oversized");
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("big".to_string(), "x".to_string().repeat(6 * 1024)); // Ethereal max 5KB
+
+        let tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: meta,
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![1; 64],
+        };
+        let res = state_manager.apply_transaction(&tx);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("Asset size exceeded") || err.contains("size"));
+    }
+
+    #[test]
+    fn test_set_asset_permissions() {
+        let config = create_test_config("perms");
+        let state_manager = StateManager::new(&config).unwrap();
+        let owner = create_test_address(1);
+        let other = create_test_address(2);
+        state_manager.create_test_account(owner, 100_000, 0);
+
+        let asset_id = crate::types::sha256(b"perm_asset");
+        let create_tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![1; 64],
+        };
+        state_manager.apply_transaction(&create_tx).unwrap();
+
+        let set_tx = Transaction::SetAssetPermissions {
+            asset_id,
+            permissions: vec![crate::types::AssetPermission {
+                grantee: other,
+                level: crate::types::PermissionLevel::PublicRead,
+                game_id: None,
+                expires_at: None,
+            }],
+            public_read: true,
+            owner,
+            signature: vec![2; 64],
+        };
+        state_manager.apply_transaction(&set_tx).unwrap();
+
+        let asset = state_manager.get_asset(&asset_id).unwrap();
+        assert!(asset.public_read);
+        assert_eq!(asset.permissions.len(), 1);
+        assert_eq!(asset.permissions[0].grantee, other);
+        assert_eq!(asset.permissions[0].level, crate::types::PermissionLevel::PublicRead);
+    }
+
+    #[test]
+    fn test_search_assets_by_density() {
+        let config = create_test_config("search_density");
+        let state_manager = StateManager::new(&config).unwrap();
+        let owner = create_test_address(1);
+        state_manager.create_test_account(owner, 100_000, 0);
+
+        let id_e = crate::types::sha256(b"e");
+        let id_l = crate::types::sha256(b"l");
+        for (id, density) in [
+            (id_e, crate::types::DensityLevel::Ethereal),
+            (id_l, crate::types::DensityLevel::Light),
+        ] {
+            let tx = Transaction::MistbornAsset {
+                action: crate::types::AssetAction::Create,
+                asset_id: id,
+                data: crate::types::AssetData {
+                    density,
+                    metadata: std::collections::HashMap::new(),
+                    attributes: vec![],
+                    game_id: None,
+                    owner,
+                },
+                signature: vec![id[0]; 64],
+            };
+            state_manager.apply_transaction(&tx).unwrap();
+        }
+
+        let ethereal = state_manager.search_assets_by_density(crate::types::DensityLevel::Ethereal);
+        let light = state_manager.search_assets_by_density(crate::types::DensityLevel::Light);
+        assert!(ethereal.contains(&id_e));
+        assert!(light.contains(&id_l));
+        assert!(!ethereal.contains(&id_l));
+        assert!(!light.contains(&id_e));
+    }
+
+    #[test]
+    fn test_write_permission_game_contract() {
+        let config = create_test_config("game_contract");
+        let state_manager = StateManager::new(&config).unwrap();
+        let owner = create_test_address(1);
+        let grantee = create_test_address(2);
+        state_manager.create_test_account(owner, 100_000, 0);
+        state_manager.create_test_account(grantee, 100_000, 0);
+
+        let asset_id = crate::types::sha256(b"game_asset");
+        let create_tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: Some("game1".to_string()),
+                owner,
+            },
+            signature: vec![1; 64],
+        };
+        state_manager.apply_transaction(&create_tx).unwrap();
+
+        let set_tx = Transaction::SetAssetPermissions {
+            asset_id,
+            permissions: vec![crate::types::AssetPermission {
+                grantee,
+                level: crate::types::PermissionLevel::GameContract,
+                game_id: Some("game1".to_string()),
+                expires_at: None,
+            }],
+            public_read: false,
+            owner,
+            signature: vec![2; 64],
+        };
+        state_manager.apply_transaction(&set_tx).unwrap();
+
+        let mut upd_meta = std::collections::HashMap::new();
+        upd_meta.insert("updated".to_string(), "by_grantee".to_string());
+        let update_tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Update,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: upd_meta,
+                attributes: vec![],
+                game_id: Some("game1".to_string()),
+                owner: grantee,
+            },
+            signature: vec![3; 64],
+        };
+        state_manager.apply_transaction(&update_tx).unwrap();
+
+        let asset = state_manager.get_asset(&asset_id).unwrap();
+        assert_eq!(asset.data.metadata.get("updated"), Some(&"by_grantee".to_string()));
+    }
+
+    #[test]
+    fn test_get_quota_usage() {
+        let config = create_test_config("quota");
+        let state_manager = StateManager::new(&config).unwrap();
+        let owner = create_test_address(1);
+        state_manager.create_test_account(owner, 100_000, 0);
+
+        let usage_empty = state_manager.get_quota_usage(&owner);
+        assert_eq!(usage_empty.assets_count, 0);
+        assert!(usage_empty.assets_limit > 0);
+        assert_eq!(usage_empty.blob_files_count, 0);
+
+        let asset_id = crate::types::sha256(b"quota_asset");
+        let tx = Transaction::MistbornAsset {
+            action: crate::types::AssetAction::Create,
+            asset_id,
+            data: crate::types::AssetData {
+                density: crate::types::DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner,
+            },
+            signature: vec![1; 64],
+        };
+        state_manager.apply_transaction(&tx).unwrap();
+
+        let usage = state_manager.get_quota_usage(&owner);
+        assert_eq!(usage.assets_count, 1);
+        assert!(usage.assets_limit > 0);
+        assert!(usage.metadata_size_limit > 0);
+    }
 }

@@ -843,7 +843,7 @@ async fn split_asset(
 }
 
 /// Estimate gas cost for asset operation
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct EstimateGasRequest {
     pub transaction: Transaction,
 }

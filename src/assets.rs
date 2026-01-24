@@ -923,4 +923,35 @@ mod tests {
         assert!(comp1.get_attribute("shared_rarity").is_some());
         assert!(comp1.get_attribute("power").is_some());
     }
+
+    #[test]
+    fn test_calculate_asset_operation_gas() {
+        use crate::types::{AssetAction, AssetData, DensityLevel};
+        use std::collections::HashMap;
+
+        let config = Config::default();
+        let mut meta = HashMap::new();
+        meta.insert("k".to_string(), "v".to_string());
+        let data = AssetData {
+            density: DensityLevel::Ethereal,
+            metadata: meta.clone(),
+            attributes: vec![],
+            game_id: None,
+            owner: [1u8; 32],
+        };
+
+        assert!(calculate_asset_operation_gas(&config, &AssetAction::Create, &data, None) > 0);
+        assert!(calculate_asset_operation_gas(&config, &AssetAction::Update, &data, None) > 0);
+        assert!(calculate_asset_operation_gas(&config, &AssetAction::Evaporate, &data, None) > 0);
+
+        let mut condense_data = data.clone();
+        condense_data.density = DensityLevel::Light;
+        assert!(calculate_asset_operation_gas(&config, &AssetAction::Condense, &condense_data, None) > 0);
+
+        assert!(calculate_asset_operation_gas(&config, &AssetAction::Merge, &data, None) > 0);
+
+        let mut add = HashMap::new();
+        add.insert("_components".to_string(), "a,b".to_string());
+        assert!(calculate_asset_operation_gas(&config, &AssetAction::Split, &data, Some(&add)) > 0);
+    }
 }
