@@ -1651,8 +1651,11 @@ impl StateManager {
         &self.blocks
     }
 
-    #[cfg(test)]
     /// Create test account (for testing only)
+    /// 
+    /// # Safety
+    /// This method bypasses normal transaction validation and should only be used in tests.
+    /// Available in test builds and integration tests.
     pub fn create_test_account(&self, address: Address, balance: u64, nonce: u64) {
         let account = AccountState {
             balance,
