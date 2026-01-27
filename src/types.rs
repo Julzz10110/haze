@@ -9,7 +9,7 @@ pub type Hash = [u8; 32];
 pub type Address = [u8; 32];
 pub type Timestamp = i64;
 
-/// Convert bytes to hex string
+/// Convert hash to hex string
 pub fn hash_to_hex(hash: &Hash) -> String {
     hex::encode(hash)
 }
@@ -21,6 +21,23 @@ pub fn hex_to_hash(s: &str) -> Option<Hash> {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&bytes);
         Some(hash)
+    } else {
+        None
+    }
+}
+
+/// Convert address to hex string
+pub fn address_to_hex(address: &Address) -> String {
+    hex::encode(address)
+}
+
+/// Convert hex string to address
+pub fn hex_to_address(s: &str) -> Option<Address> {
+    let bytes = hex::decode(s).ok()?;
+    if bytes.len() == 32 {
+        let mut address = [0u8; 32];
+        address.copy_from_slice(&bytes);
+        Some(address)
     } else {
         None
     }
@@ -213,6 +230,15 @@ mod tests {
         // Should be able to convert back
         let restored_hash = hex_to_hash(&hex_string).unwrap();
         assert_eq!(original_hash, restored_hash);
+    }
+
+    #[test]
+    fn test_address_to_hex_and_back() {
+        let original_address: Address = [42u8; 32];
+        let hex_string = address_to_hex(&original_address);
+
+        let restored_address = hex_to_address(&hex_string).unwrap();
+        assert_eq!(original_address, restored_address);
     }
 
     #[test]

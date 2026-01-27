@@ -126,13 +126,47 @@ pub fn verify_signature(public_key: &[u8], message: &[u8], signature: &[u8]) -> 
 /// Address from public key bytes
 pub fn address_from_public_key(public_key: &[u8]) -> Address {
     let mut address = [0u8; 32];
-    if public_key.len() >= 32 {
-        address.copy_from_slice(&public_key[..32]);
-    } else {
-        let hash = crate::types::sha256(public_key);
-        address.copy_from_slice(&hash);
+
+    match public_key.len() {
+        32 => {
+            // Standard case: ed25519 public key length
+            address.copy_from_slice(public_key);
+        }
+        _ => {
+            // For any non-standard length, derive address via SHA-256 hash
+            let hash = crate::types::sha256(public_key);
+            address.copy_from_slice(&hash);
+        }
     }
+
     address
+}
+
+/// Export signing key as raw 32-byte secret key
+pub fn signing_key_to_bytes(signing_key: &SigningKey) -> [u8; 32] {
+    signing_key.to_bytes()
+}
+
+/// Import signing key from raw 32-byte secret key
+pub fn signing_key_from_bytes(bytes: &[u8]) -> Result<SigningKey> {
+    let secret: &[u8; 32] = bytes
+        .try_into()
+        .map_err(|_| HazeError::Crypto("Invalid signing key length".to_string()))?;
+    Ok(SigningKey::from_bytes(secret))
+}
+
+/// Export verifying key (public key) as 32-byte array
+pub fn verifying_key_to_bytes(verifying_key: &VerifyingKey) -> [u8; 32] {
+    verifying_key.to_bytes()
+}
+
+/// Import verifying key (public key) from 32-byte array
+pub fn verifying_key_from_bytes(bytes: &[u8]) -> Result<VerifyingKey> {
+    let pk_bytes: &[u8; 32] = bytes
+        .try_into()
+        .map_err(|_| HazeError::Crypto("Invalid public key length".to_string()))?;
+    VerifyingKey::from_bytes(pk_bytes)
+        .map_err(|e| HazeError::Crypto(format!("Invalid public key: {}", e)))
 }
 
 #[cfg(test)]
@@ -223,5 +257,53 @@ mod tests {
         
         // Address should be consistent
         assert_eq!(address1, address2);
+    }
+
+    #[test]
+    fn test_address_from_short_public_key_uses_hash() {
+        let short_public_key = [1u8, 2, 3];
+
+        let address = address_from_public_key(&short_public_key);
+
+        // Address should not be all zeros and must be derived deterministically
+        assert_ne!(address, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_address_from_long_public_key_uses_hash_not_truncation() {
+        let mut long_public_key = [0u8; 64];
+        for (i, b) in long_public_key.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+
+        let address = address_from_public_key(&long_public_key);
+
+        let mut truncated = [0u8; 32];
+        truncated.copy_from_slice(&long_public_key[..32]);
+
+        // Address for long key should not be simple truncation
+        assert_ne!(address, truncated);
+    }
+
+    #[test]
+    fn test_signing_key_serialize_roundtrip() {
+        let keypair = KeyPair::generate();
+        let original_signing = keypair.signing_key;
+
+        let exported = signing_key_to_bytes(&original_signing);
+        let imported = signing_key_from_bytes(&exported).unwrap();
+
+        assert_eq!(original_signing.to_bytes(), imported.to_bytes());
+    }
+
+    #[test]
+    fn test_verifying_key_serialize_roundtrip() {
+        let keypair = KeyPair::generate();
+        let original_verifying = keypair.verifying_key();
+
+        let exported = verifying_key_to_bytes(&original_verifying);
+        let imported = verifying_key_from_bytes(&exported).unwrap();
+
+        assert_eq!(original_verifying.to_bytes(), imported.to_bytes());
     }
 }

@@ -406,9 +406,9 @@ impl StateManager {
         let version = asset_state.current_version;
         let owner = asset_state.owner;
         self.broadcast_event(WsEvent::AssetVersionCreated {
-            asset_id: hex::encode(asset_id),
+            asset_id: crate::types::hash_to_hex(asset_id),
             version,
-            owner: hex::encode(owner),
+            owner: crate::types::address_to_hex(&owner),
         });
         Ok(version)
     }
@@ -899,11 +899,11 @@ impl StateManager {
                         self.assets.insert(*asset_id, asset_state);
                         
                         // Broadcast WebSocket event
-                        self.broadcast_event(WsEvent::AssetCreated {
-                            asset_id: hex::encode(asset_id),
-                            owner: hex::encode(data.owner),
-                            density: format!("{:?}", data.density),
-                        });
+            self.broadcast_event(WsEvent::AssetCreated {
+                asset_id: crate::types::hash_to_hex(asset_id),
+                owner: crate::types::address_to_hex(&data.owner),
+                density: format!("{:?}", data.density),
+            });
                     }
                     crate::types::AssetAction::Update => {
                         let mut asset_state = self.assets.get(asset_id)
@@ -1005,8 +1005,8 @@ impl StateManager {
                         let attr_names: Vec<String> = asset_state.data.attributes.iter().map(|a| a.name.clone()).collect();
                         if !attr_names.is_empty() {
                             self.broadcast_event(WsEvent::AssetAttributeUpdated {
-                                asset_id: hex::encode(asset_id),
-                                owner: hex::encode(owner),
+                                asset_id: crate::types::hash_to_hex(asset_id),
+                                owner: crate::types::address_to_hex(&owner),
                                 attributes: attr_names,
                             });
                         }
@@ -1047,8 +1047,8 @@ impl StateManager {
                         
                         // Broadcast WebSocket event
                         self.broadcast_event(WsEvent::AssetUpdated {
-                            asset_id: hex::encode(asset_id),
-                            owner: hex::encode(owner),
+                            asset_id: crate::types::hash_to_hex(asset_id),
+                            owner: crate::types::address_to_hex(&owner),
                         });
                     }
                     crate::types::AssetAction::Condense => {

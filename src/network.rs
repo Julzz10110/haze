@@ -26,8 +26,7 @@ use libp2p_request_response::{
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::error::{HazeError, Result as HazeResult};
-use crate::types::{Block, Transaction, Hash};
-use hex;
+use crate::types::{Block, Transaction, Hash, hash_to_hex};
 
 /// Network event
 #[derive(Debug, Clone)]
@@ -476,7 +475,7 @@ impl Network {
                         match request {
                             HazeRequest::Block(block) => {
                                 let block_height = block.header.height;
-                                let block_hash = hex::encode(block.header.hash);
+                                let block_hash = hash_to_hex(&block.header.hash);
                                 tracing::info!("Received block from peer: height={}, hash={}", 
                                     block_height, &block_hash[..16]);
                                 
@@ -513,7 +512,7 @@ impl Network {
                                 }
                             }
                             HazeRequest::Transaction(tx) => {
-                                let tx_hash = hex::encode(tx.hash());
+                                let tx_hash = hash_to_hex(&tx.hash());
                                 tracing::debug!("Received transaction from peer: {}", &tx_hash[..16]);
                                 
                                 // Forward to consensus engine
@@ -567,7 +566,7 @@ impl Network {
                                 );
                             }
                             HazeRequest::RequestBlockByHash(hash) => {
-                                tracing::debug!("Sync request: block by hash {}", hex::encode(hash));
+                                tracing::debug!("Sync request: block by hash {}", hash_to_hex(&hash));
                                 
                                 let state = self.consensus.state();
                                 if let Some(block) = state.get_block(&hash) {
@@ -661,8 +660,8 @@ impl Network {
                                             if info.state_root != local_checkpoint_state_root {
                                                 tracing::warn!("State root mismatch at checkpoint height {}: peer={}, local={}", 
                                                     local_finalized_height,
-                                                    hex::encode(info.state_root),
-                                                    hex::encode(local_checkpoint_state_root));
+                                                    hash_to_hex(&info.state_root),
+                                                    hash_to_hex(&local_checkpoint_state_root));
                                                 // For MVP: log warning, full fork resolution would be needed
                                             } else {
                                                 tracing::debug!("State root matches at checkpoint height {}", local_finalized_height);
@@ -708,7 +707,7 @@ impl Network {
                                 }
                             }
                             HazeRequest::Transaction(tx) => {
-                                let tx_hash = hex::encode(tx.hash());
+                                let tx_hash = hash_to_hex(&tx.hash());
                                 tracing::debug!("Received transaction via transactions protocol: {}", &tx_hash[..16]);
                                 match self.consensus.add_transaction(tx.clone()) {
                                     Ok(()) => {
@@ -882,7 +881,7 @@ impl Network {
     pub fn request_block_by_hash(&mut self, peer_id: &PeerId, hash: Hash) -> HazeResult<()> {
         let request = HazeRequest::RequestBlockByHash(hash);
         let _request_id = self.swarm.behaviour_mut().blocks.send_request(peer_id, request);
-        tracing::debug!("Requested block {} from peer {}", hex::encode(hash), peer_id);
+        tracing::debug!("Requested block {} from peer {}", hash_to_hex(&hash), peer_id);
         Ok(())
     }
     

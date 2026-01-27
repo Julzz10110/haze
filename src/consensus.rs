@@ -782,7 +782,7 @@ impl ConsensusEngine {
         {
             let dag = self.dag.read();
             if dag.vertices.contains_key(&block_hash) {
-                tracing::debug!("Block {} already processed, skipping", hex::encode(block_hash));
+                tracing::debug!("Block {} already processed, skipping", crate::types::hash_to_hex(&block_hash));
                 return Ok(());
             }
         }
@@ -817,7 +817,7 @@ impl ConsensusEngine {
                         format!(
                             "Unknown parent for block at height {}: {}",
                             block_height,
-                            hex::encode(block.header.parent_hash)
+                            crate::types::hash_to_hex(&block.header.parent_hash)
                         )
                     ));
                 }
@@ -867,7 +867,7 @@ impl ConsensusEngine {
         match self.state.apply_block(block) {
             Ok(()) => {
                 tracing::info!("Block applied to state: height={}, hash={}", 
-                    block_height, hex::encode(block_hash));
+                    block_height, crate::types::hash_to_hex(&block_hash));
             }
             Err(e) => {
                 tracing::error!("Failed to apply block to state: {}", e);
@@ -887,7 +887,7 @@ impl ConsensusEngine {
         let state_root = self.state.compute_state_root();
         if state_root != block.header.state_root {
             tracing::warn!("State root mismatch after applying block: expected {}, got {}", 
-                hex::encode(block.header.state_root), hex::encode(state_root));
+                crate::types::hash_to_hex(&block.header.state_root), crate::types::hash_to_hex(&state_root));
             // For MVP, we'll log but continue - in production this should be an error
         }
 
@@ -908,7 +908,7 @@ impl ConsensusEngine {
                 // Allow genesis block reference (zero hash)
                 if *ref_hash != [0u8; 32] {
                     return Err(crate::error::HazeError::InvalidBlock(
-                        format!("DAG reference {} does not exist", hex::encode(ref_hash))
+                        format!("DAG reference {} does not exist", crate::types::hash_to_hex(ref_hash))
                     ));
                 }
             }

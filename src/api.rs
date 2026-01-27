@@ -22,7 +22,7 @@ use tokio::sync::broadcast;
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
-use crate::types::{Transaction, AssetAction, Hash, AssetPermission, PermissionLevel, Address};
+use crate::types::{Transaction, AssetAction, Hash, AssetPermission, PermissionLevel, Address, hash_to_hex, address_to_hex};
 use crate::state::AssetState;
 pub use crate::ws_events::WsEvent;
 
@@ -201,7 +201,7 @@ async fn get_blockchain_info(
         current_height: height,
         total_supply,
         current_wave,
-        state_root: hex::encode(state_root),
+        state_root: hash_to_hex(&state_root),
         last_finalized_height,
         last_finalized_wave,
     };
@@ -225,7 +225,7 @@ async fn send_transaction(
             tracing::debug!("Transaction added to pool, will be broadcast with next block");
             
             let response = TransactionResponse {
-                hash: hex::encode(tx_hash),
+                hash: hash_to_hex(&tx_hash),
                 status: "pending".to_string(),
             };
             Ok(Json(ApiResponse::success(response)))
@@ -241,20 +241,13 @@ async fn get_transaction(
     State(api_state): State<ApiState>,
     Path(hash_str): Path<String>,
 ) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
-    let hash_bytes = hex::decode(&hash_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if hash_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&hash_bytes);
+    let hash = crate::types::hex_to_hash(&hash_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     // Try to get from transaction pool
     if api_state.consensus.get_transaction(&hash).is_some() {
         let response = TransactionResponse {
-            hash: hex::encode(hash),
+            hash: hash_to_hex(&hash),
             status: "pending".to_string(),
         };
         return Ok(Json(ApiResponse::success(response)));
@@ -268,7 +261,7 @@ async fn get_transaction(
         for tx in &block.transactions {
             if tx.hash() == hash {
                 let response = TransactionResponse {
-                    hash: hex::encode(hash),
+                    hash: hash_to_hex(&hash),
                     status: "executed".to_string(),
                 };
                 return Ok(Json(ApiResponse::success(response)));
@@ -284,23 +277,16 @@ async fn get_block_by_hash(
     State(api_state): State<ApiState>,
     Path(hash_str): Path<String>,
 ) -> ApiResult<Json<ApiResponse<BlockInfo>>> {
-    let hash_bytes = hex::decode(&hash_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if hash_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&hash_bytes);
+    let hash = crate::types::hex_to_hash(&hash_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     if let Some(block) = api_state.state.get_block(&hash) {
         let info = BlockInfo {
-            hash: hex::encode(block.header.hash),
-            parent_hash: hex::encode(block.header.parent_hash),
+            hash: hash_to_hex(&block.header.hash),
+            parent_hash: hash_to_hex(&block.header.parent_hash),
             height: block.header.height,
             timestamp: block.header.timestamp,
-            validator: hex::encode(block.header.validator),
+            validator: address_to_hex(&block.header.validator),
             transaction_count: block.transactions.len(),
             wave_number: block.header.wave_number,
         };
@@ -317,11 +303,11 @@ async fn get_block_by_height(
 ) -> ApiResult<Json<ApiResponse<BlockInfo>>> {
     if let Some(block) = api_state.state.get_block_by_height(height) {
         let info = BlockInfo {
-            hash: hex::encode(block.header.hash),
-            parent_hash: hex::encode(block.header.parent_hash),
+            hash: hash_to_hex(&block.header.hash),
+            parent_hash: hash_to_hex(&block.header.parent_hash),
             height: block.header.height,
             timestamp: block.header.timestamp,
-            validator: hex::encode(block.header.validator),
+            validator: address_to_hex(&block.header.validator),
             transaction_count: block.transactions.len(),
             wave_number: block.header.wave_number,
         };
@@ -336,19 +322,12 @@ async fn get_account(
     State(api_state): State<ApiState>,
     Path(address_str): Path<String>,
 ) -> ApiResult<Json<ApiResponse<AccountInfo>>> {
-    let address_bytes = hex::decode(&address_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if address_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut address = [0u8; 32];
-    address.copy_from_slice(&address_bytes);
+    let address = crate::types::hex_to_address(&address_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     if let Some(account) = api_state.state.get_account(&address) {
         let info = AccountInfo {
-            address: hex::encode(address),
+            address: address_to_hex(&address),
             balance: account.balance,
             nonce: account.nonce,
             staked: account.staked,
@@ -364,15 +343,8 @@ async fn get_balance(
     State(api_state): State<ApiState>,
     Path(address_str): Path<String>,
 ) -> ApiResult<Json<ApiResponse<u64>>> {
-    let address_bytes = hex::decode(&address_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if address_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut address = [0u8; 32];
-    address.copy_from_slice(&address_bytes);
+    let address = crate::types::hex_to_address(&address_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     if let Some(account) = api_state.state.get_account(&address) {
         Ok(Json(ApiResponse::success(account.balance)))
@@ -386,15 +358,8 @@ async fn get_asset(
     State(api_state): State<ApiState>,
     Path(asset_id_str): Path<String>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
+    let asset_id = crate::types::hex_to_hash(&asset_id_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     if let Some(asset_state) = api_state.state.get_asset(&asset_id) {
         // Convert blob_refs to hex strings for JSON
@@ -404,15 +369,15 @@ async fn get_asset(
         
         let permissions_json: Vec<serde_json::Value> = asset_state.permissions.iter().map(|p| {
             serde_json::json!({
-                "grantee": hex::encode(p.grantee),
+                "grantee": address_to_hex(&p.grantee),
                 "level": format!("{:?}", p.level),
                 "game_id": p.game_id,
                 "expires_at": p.expires_at,
             })
         }).collect();
         let asset_json = serde_json::json!({
-            "asset_id": hex::encode(asset_id),
-            "owner": hex::encode(asset_state.owner),
+            "asset_id": hash_to_hex(&asset_id),
+            "owner": address_to_hex(&asset_state.owner),
             "density": format!("{:?}", asset_state.data.density),
             "metadata": asset_state.data.metadata,
             "attributes": asset_state.data.attributes,
@@ -441,20 +406,13 @@ async fn create_asset_snapshot(
     State(api_state): State<ApiState>,
     Path(asset_id_str): Path<String>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
+    let asset_id = crate::types::hex_to_hash(&asset_id_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     match api_state.state.create_asset_snapshot(&asset_id) {
         Ok(version) => {
             let response = serde_json::json!({
-                "asset_id": hex::encode(asset_id),
+                "asset_id": hash_to_hex(&asset_id),
                 "version": version,
                 "status": "created",
             });
@@ -469,15 +427,8 @@ async fn get_asset_versions(
     State(api_state): State<ApiState>,
     Path(asset_id_str): Path<String>,
 ) -> ApiResult<Json<ApiResponse<Vec<serde_json::Value>>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
+    let asset_id = crate::types::hex_to_hash(&asset_id_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     if let Some(versions) = api_state.state.get_asset_versions(&asset_id) {
         let versions_json: Vec<serde_json::Value> = versions.iter()
@@ -508,15 +459,8 @@ async fn get_asset_version(
     State(api_state): State<ApiState>,
     Path((asset_id_str, version_str)): Path<(String, String)>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
+    let asset_id = crate::types::hex_to_hash(&asset_id_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     let version = version_str.parse::<u64>()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -527,7 +471,7 @@ async fn get_asset_version(
             .collect();
         
         let version_json = serde_json::json!({
-            "asset_id": hex::encode(asset_id),
+            "asset_id": hash_to_hex(&asset_id),
             "version": asset_version.version,
             "timestamp": asset_version.timestamp,
             "density": format!("{:?}", asset_version.data.density),
@@ -548,15 +492,8 @@ async fn get_asset_history(
     Path(asset_id_str): Path<String>,
     axum::extract::Query(query): axum::extract::Query<AssetHistoryQuery>,
 ) -> ApiResult<Json<ApiResponse<Vec<serde_json::Value>>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
+    let asset_id = crate::types::hex_to_hash(&asset_id_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     let limit = query.limit.unwrap_or(0); // 0 = all
     
@@ -605,7 +542,7 @@ async fn create_asset(
     let tx_hash = tx.hash();
     match api_state.consensus.add_transaction(tx) {
         Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
-            hash: hex::encode(tx_hash),
+            hash: hash_to_hex(&tx_hash),
             status: "pending".to_string(),
         }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
@@ -633,15 +570,8 @@ async fn condense_asset(
     Path(asset_id_str): Path<String>,
     Json(request): Json<SendTransactionRequest>,
 ) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
-    let path_asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if path_asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut path_asset_id = [0u8; 32];
-    path_asset_id.copy_from_slice(&path_asset_id_bytes);
+    let path_asset_id = crate::types::hex_to_hash(&asset_id_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
 
     let tx = request.transaction;
     let (action, asset_id, signature) = match &tx {
@@ -665,7 +595,7 @@ async fn condense_asset(
     let tx_hash = tx.hash();
     match api_state.consensus.add_transaction(tx) {
         Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
-            hash: hex::encode(tx_hash),
+            hash: hash_to_hex(&tx_hash),
             status: "pending".to_string(),
         }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
@@ -680,15 +610,8 @@ async fn evaporate_asset(
     Path(asset_id_str): Path<String>,
     Json(request): Json<SendTransactionRequest>,
 ) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
-    let path_asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if path_asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut path_asset_id = [0u8; 32];
-    path_asset_id.copy_from_slice(&path_asset_id_bytes);
+    let path_asset_id = crate::types::hex_to_hash(&asset_id_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
 
     let tx = request.transaction;
     let (action, asset_id, signature) = match &tx {
@@ -712,7 +635,7 @@ async fn evaporate_asset(
     let tx_hash = tx.hash();
     match api_state.consensus.add_transaction(tx) {
         Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
-            hash: hex::encode(tx_hash),
+            hash: hash_to_hex(&tx_hash),
             status: "pending".to_string(),
         }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
@@ -727,15 +650,8 @@ async fn merge_assets(
     Path(asset_id_str): Path<String>,
     Json(request): Json<SendTransactionRequest>,
 ) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
-    let path_asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if path_asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut path_asset_id = [0u8; 32];
-    path_asset_id.copy_from_slice(&path_asset_id_bytes);
+    let path_asset_id = crate::types::hex_to_hash(&asset_id_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     let tx = request.transaction;
     let (action, asset_id, signature, data) = match &tx {
@@ -757,15 +673,8 @@ async fn merge_assets(
     let other_asset_id_str = data.metadata.get("_other_asset_id")
         .ok_or_else(|| StatusCode::BAD_REQUEST)?;
     
-    let other_asset_id_bytes = hex::decode(other_asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if other_asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut other_asset_id = [0u8; 32];
-    other_asset_id.copy_from_slice(&other_asset_id_bytes);
+    let other_asset_id = crate::types::hex_to_hash(other_asset_id_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     // Verify both assets exist
     if api_state.state.get_asset(&path_asset_id).is_none() {
@@ -778,7 +687,7 @@ async fn merge_assets(
     let tx_hash = tx.hash();
     match api_state.consensus.add_transaction(tx) {
         Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
-            hash: hex::encode(tx_hash),
+            hash: hash_to_hex(&tx_hash),
             status: "pending".to_string(),
         }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
@@ -793,15 +702,8 @@ async fn split_asset(
     Path(asset_id_str): Path<String>,
     Json(request): Json<SendTransactionRequest>,
 ) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
-    let path_asset_id_bytes = hex::decode(&asset_id_str)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if path_asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let mut path_asset_id = [0u8; 32];
-    path_asset_id.copy_from_slice(&path_asset_id_bytes);
+    let path_asset_id = crate::types::hex_to_hash(&asset_id_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
     
     let tx = request.transaction;
     let (action, asset_id, signature, data) = match &tx {
@@ -835,7 +737,7 @@ async fn split_asset(
     let tx_hash = tx.hash();
     match api_state.consensus.add_transaction(tx) {
         Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
-            hash: hex::encode(tx_hash),
+            hash: hash_to_hex(&tx_hash),
             status: "pending".to_string(),
         }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
@@ -891,25 +793,20 @@ async fn get_asset_permissions(
     State(api_state): State<ApiState>,
     Path(asset_id_str): Path<String>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
+    let asset_id = crate::types::hex_to_hash(&asset_id_str).ok_or(StatusCode::BAD_REQUEST)?;
 
     if let Some(asset_state) = api_state.state.get_asset(&asset_id) {
         let permissions_json: Vec<serde_json::Value> = asset_state.permissions.iter().map(|p| {
             serde_json::json!({
-                "grantee": hex::encode(p.grantee),
+                "grantee": address_to_hex(&p.grantee),
                 "level": format!("{:?}", p.level),
                 "game_id": p.game_id,
                 "expires_at": p.expires_at,
             })
         }).collect();
         let response = serde_json::json!({
-            "asset_id": hex::encode(asset_id),
-            "owner": hex::encode(asset_state.owner),
+            "asset_id": hash_to_hex(&asset_id),
+            "owner": address_to_hex(&asset_state.owner),
             "permissions": permissions_json,
             "public_read": asset_state.public_read,
         });
@@ -944,19 +841,9 @@ async fn set_asset_permissions(
     Path(asset_id_str): Path<String>,
     Json(req): Json<SetPermissionsRequest>,
 ) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
+    let asset_id = crate::types::hex_to_hash(&asset_id_str).ok_or(StatusCode::BAD_REQUEST)?;
 
-    let owner_bytes = hex::decode(&req.owner).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if owner_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut owner = [0u8; 32];
-    owner.copy_from_slice(&owner_bytes);
+    let owner = crate::types::hex_to_address(&req.owner).ok_or(StatusCode::BAD_REQUEST)?;
 
     if api_state.state.get_asset(&asset_id).is_none() {
         return Err(StatusCode::NOT_FOUND);
@@ -967,12 +854,7 @@ async fn set_asset_permissions(
 
     let mut permissions = Vec::with_capacity(req.permissions.len());
     for p in req.permissions {
-        let grantee_bytes = hex::decode(&p.grantee).map_err(|_| StatusCode::BAD_REQUEST)?;
-        if grantee_bytes.len() != 32 {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        let mut grantee: Address = [0u8; 32];
-        grantee.copy_from_slice(&grantee_bytes);
+        let grantee = crate::types::hex_to_address(&p.grantee).ok_or(StatusCode::BAD_REQUEST)?;
         let level = match p.level.as_str() {
             "GameContract" => PermissionLevel::GameContract,
             "PublicRead" => PermissionLevel::PublicRead,
@@ -996,7 +878,7 @@ async fn set_asset_permissions(
     let tx_hash = tx.hash();
     match api_state.consensus.add_transaction(tx) {
         Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
-            hash: hex::encode(tx_hash),
+            hash: hash_to_hex(&tx_hash),
             status: "pending".to_string(),
         }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
@@ -1008,12 +890,7 @@ async fn export_asset(
     State(api_state): State<ApiState>,
     Path(asset_id_str): Path<String>,
 ) -> ApiResult<Json<ApiResponse<serde_json::Value>>> {
-    let asset_id_bytes = hex::decode(&asset_id_str).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
+    let asset_id = crate::types::hex_to_hash(&asset_id_str).ok_or(StatusCode::BAD_REQUEST)?;
 
     let asset_state = api_state.state.get_asset(&asset_id).ok_or(StatusCode::NOT_FOUND)?;
 
@@ -1027,7 +904,7 @@ async fn export_asset(
         .iter()
         .map(|p| {
             serde_json::json!({
-                "grantee": hex::encode(p.grantee),
+                "grantee": address_to_hex(&p.grantee),
                 "level": format!("{:?}", p.level),
                 "game_id": p.game_id,
                 "expires_at": p.expires_at,
@@ -1057,8 +934,8 @@ async fn export_asset(
         .collect();
 
     let export_json = serde_json::json!({
-        "asset_id": hex::encode(asset_id),
-        "owner": hex::encode(asset_state.owner),
+        "asset_id": hash_to_hex(&asset_id),
+        "owner": address_to_hex(&asset_state.owner),
         "density": format!("{:?}", asset_state.data.density),
         "metadata": asset_state.data.metadata,
         "attributes": asset_state.data.attributes,
@@ -1095,19 +972,9 @@ async fn import_asset(
     State(api_state): State<ApiState>,
     Json(req): Json<ImportAssetRequest>,
 ) -> ApiResult<Json<ApiResponse<TransactionResponse>>> {
-    let asset_id_bytes = hex::decode(&req.asset_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if asset_id_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&asset_id_bytes);
+    let asset_id = crate::types::hex_to_hash(&req.asset_id).ok_or(StatusCode::BAD_REQUEST)?;
 
-    let owner_bytes = hex::decode(&req.owner).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if owner_bytes.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut owner = [0u8; 32];
-    owner.copy_from_slice(&owner_bytes);
+    let owner = crate::types::hex_to_address(&req.owner).ok_or(StatusCode::BAD_REQUEST)?;
 
     if api_state.state.get_asset(&asset_id).is_some() {
         return Err(StatusCode::CONFLICT);
@@ -1148,7 +1015,7 @@ async fn import_asset(
     let tx_hash = tx.hash();
     match api_state.consensus.add_transaction(tx) {
         Ok(()) => Ok(Json(ApiResponse::success(TransactionResponse {
-            hash: hex::encode(tx_hash),
+            hash: hash_to_hex(&tx_hash),
             status: "pending".to_string(),
         }))),
         Err(_) => Err(StatusCode::BAD_REQUEST),
@@ -1166,12 +1033,8 @@ async fn search_assets(
     
     // Use indexes for efficient filtering
     if let Some(ref owner_filter) = query.owner {
-        if let Ok(owner_bytes) = hex::decode(owner_filter) {
-            if owner_bytes.len() == 32 {
-                let mut owner = [0u8; 32];
-                owner.copy_from_slice(&owner_bytes);
-                candidate_ids = api_state.state.search_assets_by_owner(&owner);
-            }
+        if let Some(owner) = crate::types::hex_to_address(owner_filter) {
+            candidate_ids = api_state.state.search_assets_by_owner(&owner);
         }
     } else if let Some(ref game_id_filter) = query.game_id {
         candidate_ids = api_state.state.search_assets_by_game_id(game_id_filter);

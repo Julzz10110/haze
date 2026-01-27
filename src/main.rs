@@ -19,7 +19,7 @@ mod ws_events;
 
 use anyhow::Result;
 use tracing::{info, error};
-use hex;
+use crate::types::{address_to_hex, hash_to_hex};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     let validator_keypair = KeyPair::generate();
     let validator_address = validator_keypair.address();
     info!("✓ Validator keypair generated");
-    info!("  Validator address: {}", hex::encode(validator_address));
+    info!("  Validator address: {}", address_to_hex(&validator_address));
 
     // Initialize network
     let mut network = Network::new(config.clone(), consensus.clone()).await?;
@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
                 match consensus_for_blocks.create_block(validator_addr) {
                     Ok(block) => {
                         let block_creation_time = block_start_time.elapsed();
-                        let block_hash = hex::encode(block.header.hash);
+                        let block_hash = hash_to_hex(&block.header.hash);
                         let height = block.header.height;
                         let tx_count = block.transactions.len();
                         

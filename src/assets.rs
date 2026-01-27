@@ -174,7 +174,7 @@ impl BlobStorage {
     
     /// Get blob path
     fn get_blob_path(&self, blob_key: &str, blob_hash: &Hash) -> PathBuf {
-        let hash_hex = hex::encode(blob_hash);
+        let hash_hex = crate::types::hash_to_hex(blob_hash);
         self.storage_path.join(format!("{}_{}", blob_key, &hash_hex[..16]))
     }
 }
