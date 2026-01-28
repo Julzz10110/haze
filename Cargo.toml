@@ -20,6 +20,7 @@ ed25519-dalek = "2.1"
 sha2 = "0.10"
 blake3 = "1.5"
 rand = "0.8"
+zeroize = "1.7"
 
 # Networking
 libp2p = { version = "0.53", features = ["tcp", "tokio", "noise", "yamux", "macros", "ping", "request-response"] }

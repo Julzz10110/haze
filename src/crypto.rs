@@ -3,6 +3,7 @@
 use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
 use rand::rngs::OsRng;
 use rand::RngCore;
+use zeroize::{Zeroize, Zeroizing};
 use crate::types::Address;
 use crate::error::{HazeError, Result};
 
@@ -26,6 +27,7 @@ impl KeyPair {
         let mut secret_bytes = [0u8; 32];
         csprng.fill_bytes(&mut secret_bytes);
         let signing_key = SigningKey::from_bytes(&secret_bytes);
+        Zeroize::zeroize(&mut secret_bytes[..]);
         Self { signing_key }
     }
 
@@ -114,7 +116,7 @@ pub fn verify_signature(public_key: &[u8], message: &[u8], signature: &[u8]) -> 
     let verifying_key = VerifyingKey::from_bytes(
         public_key.try_into()
             .map_err(|_| HazeError::Crypto("Invalid public key length".to_string()))?
-    ).map_err(|e| HazeError::Crypto(format!("Invalid public key: {}", e)))?;
+    ).map_err(|_| HazeError::Crypto("Invalid public key bytes".to_string()))?;
 
     let sig_bytes: [u8; 64] = signature.try_into()
         .map_err(|_| HazeError::Crypto("Invalid signature length".to_string()))?;
@@ -142,9 +144,12 @@ pub fn address_from_public_key(public_key: &[u8]) -> Address {
     address
 }
 
-/// Export signing key as raw 32-byte secret key
-pub fn signing_key_to_bytes(signing_key: &SigningKey) -> [u8; 32] {
-    signing_key.to_bytes()
+/// Export signing key as raw 32-byte secret key.
+///
+/// The returned value is zeroized on drop. Use `.as_ref()` or `Deref` to pass
+/// to other APIs; avoid copying the bytes into long-lived storage.
+pub fn signing_key_to_bytes(signing_key: &SigningKey) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(signing_key.to_bytes())
 }
 
 /// Import signing key from raw 32-byte secret key
@@ -166,7 +171,7 @@ pub fn verifying_key_from_bytes(bytes: &[u8]) -> Result<VerifyingKey> {
         .try_into()
         .map_err(|_| HazeError::Crypto("Invalid public key length".to_string()))?;
     VerifyingKey::from_bytes(pk_bytes)
-        .map_err(|e| HazeError::Crypto(format!("Invalid public key: {}", e)))
+        .map_err(|_| HazeError::Crypto("Invalid public key bytes".to_string()))
 }
 
 #[cfg(test)]
@@ -292,7 +297,7 @@ mod tests {
         let original_signing = keypair.signing_key;
 
         let exported = signing_key_to_bytes(&original_signing);
-        let imported = signing_key_from_bytes(&exported).unwrap();
+        let imported = signing_key_from_bytes(exported.as_ref()).unwrap();
 
         assert_eq!(original_signing.to_bytes(), imported.to_bytes());
     }
