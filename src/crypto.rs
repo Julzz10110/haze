@@ -172,6 +172,7 @@ pub fn verifying_key_from_bytes(bytes: &[u8]) -> Result<VerifyingKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::RngCore;
 
     #[test]
     fn test_keypair_generation() {
@@ -305,5 +306,105 @@ mod tests {
         let imported = verifying_key_from_bytes(&exported).unwrap();
 
         assert_eq!(original_verifying.to_bytes(), imported.to_bytes());
+    }
+
+    // --- Property-style: sign then verify for random keypairs and messages ---
+
+    #[test]
+    fn test_prop_sign_verify_random_messages() {
+        let mut rng = rand::rngs::OsRng;
+        for _ in 0..50 {
+            let keypair = KeyPair::generate();
+            let public_key = keypair.verifying_key().to_bytes();
+            let len = (rng.next_u32() % 1024) as usize;
+            let mut message = vec![0u8; len];
+            rng.fill_bytes(&mut message);
+            let signature = keypair.sign(&message);
+            let ok = verify_signature(&public_key, &message, &signature).unwrap();
+            assert!(ok, "verify_signature(pk, message, sign(message)) must be true");
+        }
+    }
+
+    #[test]
+    fn test_prop_sign_verify_empty_message() {
+        let keypair = KeyPair::generate();
+        let public_key = keypair.verifying_key().to_bytes();
+        let message: &[u8] = &[];
+        let signature = keypair.sign(message);
+        let ok = verify_signature(&public_key, message, &signature).unwrap();
+        assert!(ok);
+    }
+
+    #[test]
+    fn test_prop_sign_verify_large_message() {
+        let keypair = KeyPair::generate();
+        let public_key = keypair.verifying_key().to_bytes();
+        let message = vec![0x42u8; 1_000_000];
+        let signature = keypair.sign(&message);
+        let ok = verify_signature(&public_key, &message, &signature).unwrap();
+        assert!(ok);
+    }
+
+    // --- Negative: verify_signature with bad lengths / garbage ---
+
+    #[test]
+    fn test_verify_signature_err_wrong_public_key_length() {
+        let keypair = KeyPair::generate();
+        let sig = keypair.sign(b"x");
+        let pk = keypair.verifying_key().to_bytes();
+
+        assert!(verify_signature(&[], b"x", &sig).is_err());
+        assert!(verify_signature(&pk[..1], b"x", &sig).is_err());
+        assert!(verify_signature(&pk[..31], b"x", &sig).is_err());
+        let pk33: Vec<u8> = pk.iter().copied().chain(std::iter::once(0)).collect();
+        assert!(verify_signature(&pk33, b"x", &sig).is_err());
+    }
+
+    #[test]
+    fn test_verify_signature_err_wrong_signature_length() {
+        let keypair = KeyPair::generate();
+        let pk = keypair.verifying_key().to_bytes();
+        let sig = keypair.sign(b"x");
+
+        assert!(verify_signature(&pk, b"x", &[]).is_err());
+        assert!(verify_signature(&pk, b"x", &sig[..63]).is_err());
+        let sig65: Vec<u8> = sig.iter().copied().chain(std::iter::once(0)).collect();
+        assert!(verify_signature(&pk, b"x", &sig65).is_err());
+    }
+
+    #[test]
+    fn test_verify_signature_err_invalid_public_key_bytes() {
+        use crate::error::HazeError;
+        // Random 32 bytes: from_bytes may reject (Err) or accept and verify fails (Ok(false)).
+        // Must never return Ok(true).
+        let mut bad_pk = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bad_pk);
+        let sig = [0u8; 64];
+        let r = verify_signature(&bad_pk, b"msg", &sig);
+        match r {
+            Ok(valid) => assert!(!valid, "invalid public key must not verify as true"),
+            Err(e) => assert!(matches!(e, HazeError::Crypto(_))),
+        }
+    }
+
+    #[test]
+    fn test_verify_signature_ok_false_garbage_signature() {
+        let keypair = KeyPair::generate();
+        let pk = keypair.verifying_key().to_bytes();
+        let mut garbage_sig = [0u8; 64];
+        rand::rngs::OsRng.fill_bytes(&mut garbage_sig);
+        let r = verify_signature(&pk, b"message", &garbage_sig).unwrap();
+        assert!(!r);
+    }
+
+    #[test]
+    fn test_verify_signature_ok_false_wrong_public_key() {
+        let k1 = KeyPair::generate();
+        let k2 = KeyPair::generate();
+        let msg = b"shared message";
+        let sig = k1.sign(msg);
+        let pk2 = k2.verifying_key().to_bytes();
+        let r = verify_signature(&pk2, msg, &sig).unwrap();
+        assert!(!r);
     }
 }
