@@ -91,33 +91,69 @@ pub enum Transaction {
         nonce: u64,
         signature: Vec<u8>,
     },
+
+    /// Execute smart contract
+    ContractCall {
+        /// Account that authorizes the call and pays fees
+        from: Address,
+        /// Target contract address
+        contract: Address,
+        /// Method name on the contract
+        method: String,
+        /// Encoded arguments for the method
+        args: Vec<u8>,
+        /// Gas limit for this call
+        gas_limit: u64,
+        /// Fee paid by `from` for this call
+        fee: u64,
+        /// Nonce of the `from` account (anti-replay)
+        nonce: u64,
+        /// Signature from `from` over the canonical signing payload
+        signature: Vec<u8>,
+    },
+
     /// Create or update Mistborn NFT
     MistbornAsset {
+        /// Account that authorizes and pays for this asset operation
+        from: Address,
         action: AssetAction,
         asset_id: Hash,
         data: AssetData,
+        /// Fee paid by `from` for this operation
+        fee: u64,
+        /// Nonce of the `from` account
+        nonce: u64,
+        /// Signature from `from`
         signature: Vec<u8>,
     },
-    /// Execute smart contract
-    ContractCall {
-        contract: Address,
-        method: String,
-        args: Vec<u8>,
-        gas_limit: u64,
-        signature: Vec<u8>,
-    },
+
     /// Stake tokens for validation
     Stake {
+        /// Account that stakes and pays fees
+        from: Address,
         validator: Address,
         amount: u64,
+        /// Fee paid by `from` for this stake
+        fee: u64,
+        /// Nonce of the `from` account
+        nonce: u64,
+        /// Signature from `from`
         signature: Vec<u8>,
     },
+
     /// Set asset permissions (owner only)
     SetAssetPermissions {
+        /// Account that authorizes and pays for this permissions change
+        from: Address,
         asset_id: Hash,
         permissions: Vec<AssetPermission>,
         public_read: bool,
         owner: Address,
+        /// Fee paid by `from` for this operation
+        fee: u64,
+        /// Nonce of the `from` account
+        nonce: u64,
+        /// Signature from `from`
         signature: Vec<u8>,
     },
 }

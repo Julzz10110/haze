@@ -768,7 +768,7 @@ impl StateManager {
                 // Process gas fee (burn 50%)
                 let _remaining_fee = self.tokenomics.process_gas_fee(*fee)?;
             }
-            Transaction::MistbornAsset { action, asset_id, data, .. } => {
+            Transaction::MistbornAsset { from: owner, action, asset_id, data, .. } => {
                 // Calculate gas cost for this operation
                 let gas_cost = crate::assets::calculate_asset_operation_gas(
                     &self.config,
@@ -1527,7 +1527,7 @@ impl StateManager {
                     }
                 }
             }
-            Transaction::Stake { validator, amount, .. } => {
+            Transaction::Stake { from: validator, amount, .. } => {
                 let mut account = self.accounts
                     .entry(*validator)
                     .or_insert_with(|| AccountState {
@@ -1793,6 +1793,7 @@ mod tests {
         // Create first asset
         let asset_id_1 = crate::types::sha256(b"asset1");
         let tx1 = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id: asset_id_1,
             data: crate::types::AssetData {
@@ -1811,6 +1812,8 @@ mod tests {
                 game_id: Some("game1".to_string()),
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64], // Dummy signature for test
         };
         
@@ -1820,6 +1823,7 @@ mod tests {
         // Create second asset
         let asset_id_2 = crate::types::sha256(b"asset2");
         let tx2 = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id: asset_id_2,
             data: crate::types::AssetData {
@@ -1838,6 +1842,8 @@ mod tests {
                 game_id: Some("game1".to_string()),
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![2; 64],
         };
         
@@ -1849,6 +1855,7 @@ mod tests {
         merge_metadata.insert("_other_asset_id".to_string(), hex::encode(asset_id_2));
         
         let merge_tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Merge,
             asset_id: asset_id_1,
             data: crate::types::AssetData {
@@ -1858,6 +1865,8 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![3; 64],
         };
         
@@ -1892,6 +1901,7 @@ mod tests {
         // Create first asset
         let asset_id_1 = crate::types::sha256(b"asset1");
         let tx1 = Transaction::MistbornAsset {
+            from: owner1,
             action: crate::types::AssetAction::Create,
             asset_id: asset_id_1,
             data: crate::types::AssetData {
@@ -1901,6 +1911,8 @@ mod tests {
                 game_id: None,
                 owner: owner1,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         
@@ -1909,6 +1921,7 @@ mod tests {
         // Create second asset with different owner
         let asset_id_2 = crate::types::sha256(b"asset2");
         let tx2 = Transaction::MistbornAsset {
+            from: owner2,
             action: crate::types::AssetAction::Create,
             asset_id: asset_id_2,
             data: crate::types::AssetData {
@@ -1918,6 +1931,8 @@ mod tests {
                 game_id: None,
                 owner: owner2,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![2; 64],
         };
         
@@ -1928,6 +1943,7 @@ mod tests {
         merge_metadata.insert("_other_asset_id".to_string(), hex::encode(asset_id_2));
         
         let merge_tx = Transaction::MistbornAsset {
+            from: owner1,
             action: crate::types::AssetAction::Merge,
             asset_id: asset_id_1,
             data: crate::types::AssetData {
@@ -1937,6 +1953,8 @@ mod tests {
                 game_id: None,
                 owner: owner1,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![3; 64],
         };
         
@@ -1966,6 +1984,7 @@ mod tests {
         metadata.insert("component3".to_string(), "armor_data".to_string());
         
         let tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -1981,6 +2000,8 @@ mod tests {
                 game_id: Some("game1".to_string()),
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         
@@ -1992,6 +2013,7 @@ mod tests {
         split_metadata.insert("_components".to_string(), "component1,component2,component3".to_string());
         
         let split_tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Split,
             asset_id,
             data: crate::types::AssetData {
@@ -2001,6 +2023,8 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![2; 64],
         };
         
@@ -2042,6 +2066,7 @@ mod tests {
         // Create asset
         let asset_id = crate::types::sha256(b"asset");
         let tx = Transaction::MistbornAsset {
+            from: owner1,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -2055,6 +2080,8 @@ mod tests {
                 game_id: None,
                 owner: owner1,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         
@@ -2065,6 +2092,7 @@ mod tests {
         split_metadata.insert("_components".to_string(), "component1".to_string());
         
         let split_tx = Transaction::MistbornAsset {
+            from: owner2, // Wrong owner
             action: crate::types::AssetAction::Split,
             asset_id,
             data: crate::types::AssetData {
@@ -2074,6 +2102,8 @@ mod tests {
                 game_id: None,
                 owner: owner2, // Wrong owner
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![2; 64],
         };
         
@@ -2103,6 +2133,7 @@ mod tests {
         
         // Create asset
         let tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -2112,6 +2143,8 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         
@@ -2135,9 +2168,10 @@ mod tests {
         state_manager.create_test_account(owner2, 100_000, 0);
         
         // Create assets for owner1
-        for i in 0..3 {
+            for i in 0..3 {
             let asset_id = crate::types::sha256(&format!("asset1_{}", i).into_bytes());
             let tx = Transaction::MistbornAsset {
+                from: owner1,
                 action: crate::types::AssetAction::Create,
                 asset_id,
                 data: crate::types::AssetData {
@@ -2147,6 +2181,8 @@ mod tests {
                     game_id: None,
                     owner: owner1,
                 },
+                fee: 0,
+                nonce: 0,
                 signature: vec![1; 64],
             };
             state_manager.apply_transaction(&tx).unwrap();
@@ -2155,6 +2191,7 @@ mod tests {
         // Create asset for owner2
         let asset_id2 = crate::types::sha256(b"asset2");
         let tx2 = Transaction::MistbornAsset {
+            from: owner2,
             action: crate::types::AssetAction::Create,
             asset_id: asset_id2,
             data: crate::types::AssetData {
@@ -2164,6 +2201,8 @@ mod tests {
                 game_id: None,
                 owner: owner2,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![2; 64],
         };
         state_manager.apply_transaction(&tx2).unwrap();
@@ -2186,6 +2225,7 @@ mod tests {
         for i in 0..2 {
             let asset_id = crate::types::sha256(&format!("game_asset_{}", i).into_bytes());
             let tx = Transaction::MistbornAsset {
+                from: owner,
                 action: crate::types::AssetAction::Create,
                 asset_id,
                 data: crate::types::AssetData {
@@ -2195,6 +2235,8 @@ mod tests {
                     game_id: Some("game1".to_string()),
                     owner,
                 },
+                fee: 0,
+                nonce: 0,
                 signature: vec![1; 64],
             };
             state_manager.apply_transaction(&tx).unwrap();
@@ -2218,6 +2260,7 @@ mod tests {
         
         // Create asset
         let tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -2227,6 +2270,8 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         
@@ -2276,6 +2321,7 @@ mod tests {
         
         // Create asset
         let tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -2285,6 +2331,8 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         
@@ -2295,6 +2343,7 @@ mod tests {
         condense_metadata.insert("new_data".to_string(), "value".to_string());
         
         let condense_tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Condense,
             asset_id,
             data: crate::types::AssetData {
@@ -2304,6 +2353,8 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![2; 64],
         };
         
@@ -2332,6 +2383,7 @@ mod tests {
         meta.insert("name".to_string(), "Test Asset".to_string());
 
         let tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -2341,6 +2393,8 @@ mod tests {
                 game_id: Some("g1".to_string()),
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         state_manager.apply_transaction(&tx).unwrap();
@@ -2361,6 +2415,7 @@ mod tests {
 
         let asset_id = crate::types::sha256(b"evap_asset");
         let create_tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -2370,12 +2425,15 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         state_manager.apply_transaction(&create_tx).unwrap();
         assert_eq!(state_manager.get_asset(&asset_id).unwrap().data.density, crate::types::DensityLevel::Light);
 
         let evap_tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Evaporate,
             asset_id,
             data: crate::types::AssetData {
@@ -2385,6 +2443,8 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![2; 64],
         };
         state_manager.apply_transaction(&evap_tx).unwrap();
@@ -2405,6 +2465,7 @@ mod tests {
         meta.insert("big".to_string(), "x".to_string().repeat(6 * 1024)); // Ethereal max 5KB
 
         let tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -2414,6 +2475,8 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         let res = state_manager.apply_transaction(&tx);
@@ -2432,6 +2495,7 @@ mod tests {
 
         let asset_id = crate::types::sha256(b"perm_asset");
         let create_tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -2441,11 +2505,14 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         state_manager.apply_transaction(&create_tx).unwrap();
 
         let set_tx = Transaction::SetAssetPermissions {
+            from: owner,
             asset_id,
             permissions: vec![crate::types::AssetPermission {
                 grantee: other,
@@ -2455,6 +2522,8 @@ mod tests {
             }],
             public_read: true,
             owner,
+            fee: 0,
+            nonce: 0,
             signature: vec![2; 64],
         };
         state_manager.apply_transaction(&set_tx).unwrap();
@@ -2480,6 +2549,7 @@ mod tests {
             (id_l, crate::types::DensityLevel::Light),
         ] {
             let tx = Transaction::MistbornAsset {
+                from: owner,
                 action: crate::types::AssetAction::Create,
                 asset_id: id,
                 data: crate::types::AssetData {
@@ -2489,6 +2559,8 @@ mod tests {
                     game_id: None,
                     owner,
                 },
+                fee: 0,
+                nonce: 0,
                 signature: vec![id[0]; 64],
             };
             state_manager.apply_transaction(&tx).unwrap();
@@ -2513,6 +2585,7 @@ mod tests {
 
         let asset_id = crate::types::sha256(b"game_asset");
         let create_tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -2522,11 +2595,14 @@ mod tests {
                 game_id: Some("game1".to_string()),
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         state_manager.apply_transaction(&create_tx).unwrap();
 
         let set_tx = Transaction::SetAssetPermissions {
+            from: owner,
             asset_id,
             permissions: vec![crate::types::AssetPermission {
                 grantee,
@@ -2536,6 +2612,8 @@ mod tests {
             }],
             public_read: false,
             owner,
+            fee: 0,
+            nonce: 0,
             signature: vec![2; 64],
         };
         state_manager.apply_transaction(&set_tx).unwrap();
@@ -2543,6 +2621,7 @@ mod tests {
         let mut upd_meta = std::collections::HashMap::new();
         upd_meta.insert("updated".to_string(), "by_grantee".to_string());
         let update_tx = Transaction::MistbornAsset {
+            from: grantee,
             action: crate::types::AssetAction::Update,
             asset_id,
             data: crate::types::AssetData {
@@ -2552,6 +2631,8 @@ mod tests {
                 game_id: Some("game1".to_string()),
                 owner: grantee,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![3; 64],
         };
         state_manager.apply_transaction(&update_tx).unwrap();
@@ -2574,6 +2655,7 @@ mod tests {
 
         let asset_id = crate::types::sha256(b"quota_asset");
         let tx = Transaction::MistbornAsset {
+            from: owner,
             action: crate::types::AssetAction::Create,
             asset_id,
             data: crate::types::AssetData {
@@ -2583,6 +2665,8 @@ mod tests {
                 game_id: None,
                 owner,
             },
+            fee: 0,
+            nonce: 0,
             signature: vec![1; 64],
         };
         state_manager.apply_transaction(&tx).unwrap();

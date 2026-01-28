@@ -84,7 +84,9 @@ async fn e2e_estimate_gas_create() {
 
     let mut meta = std::collections::HashMap::new();
     meta.insert("name".to_string(), "test".to_string());
+    let owner = [1u8; 32];
     let tx = Transaction::MistbornAsset {
+        from: owner,
         action: AssetAction::Create,
         asset_id: [0u8; 32],
         data: AssetData {
@@ -92,8 +94,10 @@ async fn e2e_estimate_gas_create() {
             metadata: meta,
             attributes: vec![],
             game_id: None,
-            owner: [1u8; 32],
+            owner,
         },
+        fee: 0,
+        nonce: 0,
         signature: vec![0; 64],
     };
 

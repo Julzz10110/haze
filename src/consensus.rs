@@ -305,19 +305,24 @@ impl ConsensusEngine {
     ///
     /// Verifies that the transaction signature is valid for the signer's address.
     /// In HAZE, the address is the first 32 bytes of the ED25519 public key.
-    fn verify_transaction_signature(&self, tx: &Transaction, signer_address: &Address) -> Result<()> {
-        let signature = match tx {
-            Transaction::Transfer { signature, .. } => signature,
-            Transaction::Stake { signature, .. } => signature,
-            Transaction::ContractCall { signature, .. } => signature,
-            Transaction::MistbornAsset { signature, .. } => signature,
-            Transaction::SetAssetPermissions { signature, .. } => signature,
+    ///
+    /// NOTE: With the unified transaction model, the logical signer is always `from`
+    /// for all user-initiated transactions. The `signer_address` argument is kept
+    /// for backward compatibility but is no longer used.
+    fn verify_transaction_signature(&self, tx: &Transaction, _signer_address: &Address) -> Result<()> {
+        // Determine signer (always `from`) and signature
+        let (signer_address, signature) = match tx {
+            Transaction::Transfer { from, signature, .. } => (from, signature),
+            Transaction::ContractCall { from, signature, .. } => (from, signature),
+            Transaction::MistbornAsset { from, signature, .. } => (from, signature),
+            Transaction::Stake { from, signature, .. } => (from, signature),
+            Transaction::SetAssetPermissions { from, signature, .. } => (from, signature),
         };
 
         // Get transaction data for signing (transaction without signature field)
         let tx_data = self.get_transaction_data_for_signing(tx);
 
-        // Verify signature using address as public key (first 32 bytes of ED25519 pubkey)
+        // Verify signature using `from` address as public key (32-byte ED25519 pubkey)
         let is_valid = verify_signature(signer_address, &tx_data, signature)
             .map_err(|e| crate::error::HazeError::InvalidTransaction(
                 format!("Signature verification error: {}", e)
@@ -501,9 +506,6 @@ impl ConsensusEngine {
     /// Creates a serialized representation of the transaction without the signature
     /// for use in signature verification. The data format matches what was signed.
     fn get_transaction_data_for_signing(&self, tx: &Transaction) -> Vec<u8> {
-        
-        // Serialize transaction data without signature
-        // We manually serialize each field to match the signing format
         match tx {
             Transaction::Transfer { from, to, amount, fee, nonce, .. } => {
                 let mut data = Vec::new();
@@ -515,27 +517,24 @@ impl ConsensusEngine {
                 data.extend_from_slice(&nonce.to_le_bytes());
                 data
             }
-            Transaction::Stake { validator, amount, .. } => {
-                let mut data = Vec::new();
-                data.extend_from_slice(b"Stake");
-                data.extend_from_slice(validator);
-                data.extend_from_slice(&amount.to_le_bytes());
-                data
-            }
-            Transaction::ContractCall { contract, method, args, gas_limit, .. } => {
+            Transaction::ContractCall { from, contract, method, args, gas_limit, fee, nonce, .. } => {
                 let mut data = Vec::new();
                 data.extend_from_slice(b"ContractCall");
+                data.extend_from_slice(from);
                 data.extend_from_slice(contract);
                 data.extend_from_slice(method.as_bytes());
                 data.push(0); // Null terminator for method
                 data.extend_from_slice(&gas_limit.to_le_bytes());
+                data.extend_from_slice(&fee.to_le_bytes());
+                data.extend_from_slice(&nonce.to_le_bytes());
                 data.extend_from_slice(args);
                 data
             }
-            Transaction::MistbornAsset { action, asset_id, data, .. } => {
+            Transaction::MistbornAsset { from, action, asset_id, data, fee, nonce, .. } => {
                 // Serialize asset data for signing
                 let mut serialized = Vec::new();
                 serialized.extend_from_slice(b"MistbornAsset");
+                serialized.extend_from_slice(from);
                 // Serialize action as u8
                 serialized.push(match action {
                     crate::types::AssetAction::Create => 0,
@@ -554,7 +553,7 @@ impl ConsensusEngine {
                     crate::types::DensityLevel::Dense => 2,
                     crate::types::DensityLevel::Core => 3,
                 });
-                
+
                 // For Merge: include other_asset_id in signature
                 if matches!(action, crate::types::AssetAction::Merge) {
                     if let Some(other_asset_id_str) = data.metadata.get("_other_asset_id") {
@@ -565,25 +564,42 @@ impl ConsensusEngine {
                         }
                     }
                 }
-                
+
                 // For Split: include components in signature
                 if matches!(action, crate::types::AssetAction::Split) {
                     if let Some(components_str) = data.metadata.get("_components") {
                         serialized.extend_from_slice(components_str.as_bytes());
                     }
                 }
-                
+
+                // Common fee/nonce fields for MistbornAsset
+                serialized.extend_from_slice(&fee.to_le_bytes());
+                serialized.extend_from_slice(&nonce.to_le_bytes());
+
                 serialized
             }
-            Transaction::SetAssetPermissions { asset_id, permissions, public_read, owner, .. } => {
+            Transaction::Stake { from, validator, amount, fee, nonce, .. } => {
+                let mut data = Vec::new();
+                data.extend_from_slice(b"Stake");
+                data.extend_from_slice(from);
+                data.extend_from_slice(validator);
+                data.extend_from_slice(&amount.to_le_bytes());
+                data.extend_from_slice(&fee.to_le_bytes());
+                data.extend_from_slice(&nonce.to_le_bytes());
+                data
+            }
+            Transaction::SetAssetPermissions { from, asset_id, permissions, public_read, owner, fee, nonce, .. } => {
                 let mut data = Vec::new();
                 data.extend_from_slice(b"SetAssetPermissions");
+                data.extend_from_slice(from);
                 data.extend_from_slice(asset_id);
                 data.extend_from_slice(owner);
                 data.push(if *public_read { 1 } else { 0 });
                 let perm_bytes = bincode::serialize(permissions).unwrap_or_default();
                 data.extend_from_slice(&(perm_bytes.len() as u32).to_le_bytes());
                 data.extend_from_slice(&perm_bytes);
+                data.extend_from_slice(&fee.to_le_bytes());
+                data.extend_from_slice(&nonce.to_le_bytes());
                 data
             }
         }
@@ -1279,8 +1295,11 @@ mod tests {
         let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
         
         let tx = Transaction::Stake {
+            from: [1u8; 32],
             validator: [1u8; 32],
             amount: 1000,
+            fee: 0,
+            nonce: 0,
             signature: vec![], // Empty signature
         };
         
@@ -1299,10 +1318,13 @@ mod tests {
         let asset_id = crate::types::sha256(b"perm_asset");
 
         let tx = Transaction::SetAssetPermissions {
+            from: owner,
             asset_id,
             permissions: vec![],
             public_read: false,
             owner,
+            fee: 0,
+            nonce: 0,
             signature: vec![], // Empty signature
         };
 

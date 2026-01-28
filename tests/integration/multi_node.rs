@@ -13,7 +13,7 @@ use hex;
 
 static MULTI_NODE_TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Sign MistbornAsset transaction (matches consensus signing format)
+/// Sign MistbornAsset transaction (must mirror consensus::get_transaction_data_for_signing)
 fn sign_mistborn_asset_tx(
     keypair: &KeyPair,
     action: &AssetAction,
@@ -22,6 +22,9 @@ fn sign_mistborn_asset_tx(
 ) -> Vec<u8> {
     let mut serialized = Vec::new();
     serialized.extend_from_slice(b"MistbornAsset");
+    // from (signer) — в тестах это всегда владелец
+    serialized.extend_from_slice(&data.owner);
+    // action as u8
     serialized.push(match action {
         AssetAction::Create => 0,
         AssetAction::Update => 1,
@@ -56,6 +59,10 @@ fn sign_mistborn_asset_tx(
             serialized.extend_from_slice(components_str.as_bytes());
         }
     }
+    
+    // fee и nonce — в тестах всегда 0
+    serialized.extend_from_slice(&0u64.to_le_bytes());
+    serialized.extend_from_slice(&0u64.to_le_bytes());
     
     keypair.sign(&serialized)
 }
@@ -98,9 +105,12 @@ async fn test_multi_node_asset_sync() {
     let signature = sign_mistborn_asset_tx(&keypair1, &AssetAction::Create, &asset_id, &data);
     
     let tx = Transaction::MistbornAsset {
+        from: owner,
         action: AssetAction::Create,
         asset_id,
         data,
+        fee: 0,
+        nonce: 0,
         signature,
     };
     
@@ -156,9 +166,12 @@ async fn test_multi_node_block_chain_sync() {
         let signature = sign_mistborn_asset_tx(&keypair1, &AssetAction::Create, &asset_id, &data);
         
         let tx = Transaction::MistbornAsset {
+            from: owner,
             action: AssetAction::Create,
             asset_id,
             data,
+            fee: 0,
+            nonce: 0,
             signature,
         };
         

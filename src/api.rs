@@ -655,7 +655,7 @@ async fn merge_assets(
     
     let tx = request.transaction;
     let (action, asset_id, signature, data) = match &tx {
-        Transaction::MistbornAsset { action, asset_id, signature, data } => (action, asset_id, signature, data),
+        Transaction::MistbornAsset { action, asset_id, signature, data, .. } => (action, asset_id, signature, data),
         _ => return Err(StatusCode::BAD_REQUEST),
     };
     
@@ -707,7 +707,7 @@ async fn split_asset(
     
     let tx = request.transaction;
     let (action, asset_id, signature, data) = match &tx {
-        Transaction::MistbornAsset { action, asset_id, signature, data } => (action, asset_id, signature, data),
+        Transaction::MistbornAsset { action, asset_id, signature, data, .. } => (action, asset_id, signature, data),
         _ => return Err(StatusCode::BAD_REQUEST),
     };
     
@@ -869,10 +869,13 @@ async fn set_asset_permissions(
     }
 
     let tx = Transaction::SetAssetPermissions {
+        from: owner,
         asset_id,
         permissions,
         public_read: req.public_read,
         owner,
+        fee: 0,
+        nonce: 0,
         signature: req.signature,
     };
     let tx_hash = tx.hash();
@@ -1007,9 +1010,12 @@ async fn import_asset(
     };
 
     let tx = Transaction::MistbornAsset {
+        from: owner,
         action: AssetAction::Create,
         asset_id,
         data,
+        fee: 0,
+        nonce: 0,
         signature,
     };
     let tx_hash = tx.hash();
