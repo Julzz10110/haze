@@ -35,13 +35,19 @@ export class TransactionBuilder {
    * Create a stake transaction
    */
   static createStake(
+    from: Address,
     validator: Address,
-    amount: bigint
+    amount: bigint,
+    fee: bigint,
+    nonce: number
   ): StakeTransaction {
     return {
       type: 'Stake',
+      from,
       validator,
       amount,
+      fee,
+      nonce,
       signature: new Uint8Array(0), // Will be set when signing
     };
   }

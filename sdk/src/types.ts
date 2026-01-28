@@ -85,9 +85,15 @@ export interface TransferTransaction {
  */
 export interface MistbornAssetTransaction {
   type: "MistbornAsset";
+  /** Account that authorizes the operation and pays the fee */
+  from: Address;
   action: AssetAction;
   asset_id: Hash;
   data: AssetData;
+  /** Fee in base units (matches Rust `u64` fee field) */
+  fee: bigint;
+  /** Nonce for the `from` account */
+  nonce: number;
   signature: Uint8Array;
 }
 
@@ -96,10 +102,16 @@ export interface MistbornAssetTransaction {
  */
 export interface ContractCallTransaction {
   type: "ContractCall";
+  /** Account that authorizes the call and pays gas/fee */
+  from: Address;
   contract: Address;
   method: string;
   args: Uint8Array;
   gas_limit: bigint;
+  /** Fee in base units (matches Rust `u64` fee field) */
+  fee: bigint;
+  /** Nonce for the `from` account */
+  nonce: number;
   signature: Uint8Array;
 }
 
@@ -108,8 +120,15 @@ export interface ContractCallTransaction {
  */
 export interface StakeTransaction {
   type: "Stake";
+  /** Account that stakes and pays the fee (matches Rust `from`) */
+  from: Address;
+  /** Validator being staked to */
   validator: Address;
   amount: bigint;
+  /** Fee in base units (matches Rust `u64` fee field) */
+  fee: bigint;
+  /** Nonce for the `from` account */
+  nonce: number;
   signature: Uint8Array;
 }
 

@@ -62,9 +62,12 @@ export class MistbornAsset {
     
     return {
       type: 'MistbornAsset',
+      from: owner,
       action: AssetAction.Create,
       asset_id: assetId,
       data,
+      fee: 0n,
+      nonce: 0,
       signature: new Uint8Array(0), // Will be set when signing
     };
   }
@@ -87,9 +90,12 @@ export class MistbornAsset {
 
     return {
       type: 'MistbornAsset',
+      from: owner,
       action: AssetAction.Update,
       asset_id: assetId,
       data,
+      fee: 0n,
+      nonce: 0,
       signature: new Uint8Array(0), // Will be set when signing
     };
   }
@@ -113,9 +119,12 @@ export class MistbornAsset {
 
     return {
       type: 'MistbornAsset',
+      from: owner,
       action: AssetAction.Condense,
       asset_id: assetId,
       data,
+      fee: 0n,
+      nonce: 0,
       signature: new Uint8Array(0), // Will be set when signing
     };
   }
@@ -137,9 +146,12 @@ export class MistbornAsset {
 
     return {
       type: 'MistbornAsset',
+      from: owner,
       action: AssetAction.Evaporate,
       asset_id: assetId,
       data,
+      fee: 0n,
+      nonce: 0,
       signature: new Uint8Array(0), // Will be set when signing
     };
   }

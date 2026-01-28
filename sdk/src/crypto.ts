@@ -190,28 +190,63 @@ export function getTransactionDataForSigning(tx: Transaction): Uint8Array {
     case 'Stake': {
       return concatBytes([
         enc.encode('Stake'),
+        tx.from,
         tx.validator,
         u64le(tx.amount),
+        u64le(tx.fee),
+        u64le(BigInt(tx.nonce)),
       ]);
     }
     case 'ContractCall': {
       return concatBytes([
         enc.encode('ContractCall'),
+        tx.from,
         tx.contract,
         enc.encode(tx.method),
         new Uint8Array([0]),
         u64le(tx.gas_limit),
+        u64le(tx.fee),
+        u64le(BigInt(tx.nonce)),
         tx.args,
       ]);
     }
     case 'MistbornAsset': {
-      return concatBytes([
-        enc.encode('MistbornAsset'),
-        new Uint8Array([actionToByte(tx.action)]),
-        tx.asset_id,
-        tx.data.owner,
-        new Uint8Array([densityToByte(tx.data.density)]),
-      ]);
+      const parts: Uint8Array[] = [];
+      parts.push(enc.encode('MistbornAsset'));
+      // from (signer)
+      parts.push(tx.from);
+      // action as u8
+      parts.push(new Uint8Array([actionToByte(tx.action)]));
+      // asset_id and owner
+      parts.push(tx.asset_id);
+      parts.push(tx.data.owner);
+      // density as u8
+      parts.push(new Uint8Array([densityToByte(tx.data.density)]));
+
+      // For Merge: include other_asset_id in signature (hex-encoded in metadata)
+      if (tx.action === 'Merge') {
+        const otherIdHex = tx.data.metadata['_other_asset_id'];
+        if (otherIdHex) {
+          const otherBytes = new Uint8Array(Buffer.from(otherIdHex, 'hex'));
+          if (otherBytes.length === 32) {
+            parts.push(otherBytes);
+          }
+        }
+      }
+
+      // For Split: include components in signature
+      if (tx.action === 'Split') {
+        const componentsStr = tx.data.metadata['_components'];
+        if (componentsStr) {
+          parts.push(enc.encode(componentsStr));
+        }
+      }
+
+      // Common fee/nonce fields for MistbornAsset
+      parts.push(u64le(tx.fee));
+      parts.push(u64le(BigInt(tx.nonce)));
+
+      return concatBytes(parts);
     }
   }
 }
