@@ -79,10 +79,204 @@ impl<T> ApiResponse<T> {
     }
 }
 
-/// Transaction request
+/// Transaction request (accepts hex strings for byte fields in JSON)
 #[derive(Debug, Deserialize)]
 pub struct SendTransactionRequest {
+    #[serde(deserialize_with = "de_transaction_from_json")]
     pub transaction: Transaction,
+}
+
+
+fn de_transaction_from_json<'de, D>(d: D) -> Result<Transaction, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    parse_transaction_from_value(&v).map_err(serde::de::Error::custom)
+}
+
+fn bytes_from_value(v: &serde_json::Value) -> Result<Vec<u8>, String> {
+    if let Some(s) = v.as_str() {
+        hex::decode(s).map_err(|e| e.to_string())
+    } else if let Some(arr) = v.as_array() {
+        let mut out = Vec::with_capacity(arr.len());
+        for x in arr {
+            let n = x.as_u64().ok_or("expected number in byte array")?;
+            if n > 255 {
+                return Err("byte value > 255".to_string());
+            }
+            out.push(n as u8);
+        }
+        Ok(out)
+    } else {
+        Err("expected hex string or array of bytes".to_string())
+    }
+}
+
+fn bytes32_from_value(v: &serde_json::Value) -> Result<[u8; 32], String> {
+    let b = bytes_from_value(v)?;
+    if b.len() != 32 {
+        return Err("expected 32 bytes".to_string());
+    }
+    let mut a = [0u8; 32];
+    a.copy_from_slice(&b);
+    Ok(a)
+}
+
+fn u64_from_value(v: &serde_json::Value) -> Result<u64, String> {
+    if let Some(n) = v.as_u64() {
+        return Ok(n);
+    }
+    if let Some(s) = v.as_str() {
+        return s.parse::<u64>().map_err(|e| e.to_string());
+    }
+    Err("expected number or string".to_string())
+}
+
+fn asset_data_from_value(v: &serde_json::Value) -> Result<crate::types::AssetData, String> {
+    let obj = v.as_object().ok_or("expected object for data")?;
+    let density = match obj.get("density").and_then(|d| d.as_str()) {
+        Some("Ethereal") => crate::types::DensityLevel::Ethereal,
+        Some("Light") => crate::types::DensityLevel::Light,
+        Some("Dense") => crate::types::DensityLevel::Dense,
+        Some("Core") => crate::types::DensityLevel::Core,
+        _ => return Err("invalid density".to_string()),
+    };
+    let metadata: std::collections::HashMap<String, String> = obj
+        .get("metadata")
+        .and_then(|m| m.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let attributes: Vec<crate::types::Attribute> = obj
+        .get("attributes")
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| {
+                    let o = x.as_object()?;
+                    Some(crate::types::Attribute {
+                        name: o.get("name")?.as_str()?.to_string(),
+                        value: o.get("value")?.as_str()?.to_string(),
+                        rarity: o.get("rarity").and_then(|r| r.as_f64()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let game_id = obj
+        .get("game_id")
+        .and_then(|g| g.as_str())
+        .map(String::from)
+        .or_else(|| obj.get("game_id").and_then(|g| g.as_null()).map(|_| "".into()))
+        .filter(|s| !s.is_empty());
+    let game_id = if game_id.as_deref() == Some("") { None } else { game_id };
+    let owner = bytes32_from_value(obj.get("owner").ok_or("missing owner")?)?;
+    Ok(crate::types::AssetData {
+        density,
+        metadata,
+        attributes,
+        game_id,
+        owner,
+    })
+}
+
+fn parse_transaction_from_value(v: &serde_json::Value) -> Result<Transaction, String> {
+    let obj = v.as_object().ok_or("transaction must be an object")?;
+    if obj.len() != 1 {
+        return Err("transaction must have exactly one variant key".to_string());
+    }
+    let (tag, inner) = obj.iter().next().ok_or("empty transaction")?;
+    let inner = inner.as_object().ok_or("variant value must be object")?;
+
+    match tag.as_str() {
+        "Transfer" => {
+            let from = bytes32_from_value(inner.get("from").ok_or("missing from")?)?;
+            let to = bytes32_from_value(inner.get("to").ok_or("missing to")?)?;
+            let amount = u64_from_value(inner.get("amount").ok_or("missing amount")?)?;
+            let fee = u64_from_value(inner.get("fee").ok_or("missing fee")?)?;
+            let nonce = u64_from_value(inner.get("nonce").ok_or("missing nonce")?)?;
+            let signature = bytes_from_value(inner.get("signature").ok_or("missing signature")?)?;
+            Ok(Transaction::Transfer {
+                from,
+                to,
+                amount,
+                fee,
+                nonce,
+                signature,
+            })
+        }
+        "ContractCall" => {
+            let from = bytes32_from_value(inner.get("from").ok_or("missing from")?)?;
+            let contract = bytes32_from_value(inner.get("contract").ok_or("missing contract")?)?;
+            let method = inner
+                .get("method")
+                .and_then(|m| m.as_str())
+                .ok_or("missing method")?
+                .to_string();
+            let args = bytes_from_value(inner.get("args").ok_or("missing args")?).unwrap_or_default();
+            let gas_limit = u64_from_value(inner.get("gas_limit").ok_or("missing gas_limit")?)?;
+            let fee = u64_from_value(inner.get("fee").ok_or("missing fee")?)?;
+            let nonce = u64_from_value(inner.get("nonce").ok_or("missing nonce")?)?;
+            let signature = bytes_from_value(inner.get("signature").ok_or("missing signature")?)?;
+            Ok(Transaction::ContractCall {
+                from,
+                contract,
+                method,
+                args,
+                gas_limit,
+                fee,
+                nonce,
+                signature,
+            })
+        }
+        "MistbornAsset" => {
+            let from = bytes32_from_value(inner.get("from").ok_or("missing from")?)?;
+            let action = match inner.get("action").and_then(|a| a.as_str()) {
+                Some("Create") => AssetAction::Create,
+                Some("Update") => AssetAction::Update,
+                Some("Condense") => AssetAction::Condense,
+                Some("Evaporate") => AssetAction::Evaporate,
+                Some("Merge") => AssetAction::Merge,
+                Some("Split") => AssetAction::Split,
+                _ => return Err("invalid MistbornAsset action".to_string()),
+            };
+            let asset_id = bytes32_from_value(inner.get("asset_id").ok_or("missing asset_id")?)?;
+            let data = asset_data_from_value(inner.get("data").ok_or("missing data")?)?;
+            let fee = u64_from_value(inner.get("fee").ok_or("missing fee")?)?;
+            let nonce = u64_from_value(inner.get("nonce").ok_or("missing nonce")?)?;
+            let signature = bytes_from_value(inner.get("signature").ok_or("missing signature")?)?;
+            Ok(Transaction::MistbornAsset {
+                from,
+                action,
+                asset_id,
+                data,
+                fee,
+                nonce,
+                signature,
+            })
+        }
+        "Stake" => {
+            let from = bytes32_from_value(inner.get("from").ok_or("missing from")?)?;
+            let validator = bytes32_from_value(inner.get("validator").ok_or("missing validator")?)?;
+            let amount = u64_from_value(inner.get("amount").ok_or("missing amount")?)?;
+            let fee = u64_from_value(inner.get("fee").ok_or("missing fee")?)?;
+            let nonce = u64_from_value(inner.get("nonce").ok_or("missing nonce")?)?;
+            let signature = bytes_from_value(inner.get("signature").ok_or("missing signature")?)?;
+            Ok(Transaction::Stake {
+                from,
+                validator,
+                amount,
+                fee,
+                nonce,
+                signature,
+            })
+        }
+        _ => Err(format!("unknown transaction variant: {}", tag)),
+    }
 }
 
 /// Transaction response
@@ -744,9 +938,10 @@ async fn split_asset(
     }
 }
 
-/// Estimate gas cost for asset operation
+/// Estimate gas cost for asset operation (accepts hex strings for byte fields in JSON)
 #[derive(Debug, Deserialize, Serialize)]
 pub struct EstimateGasRequest {
+    #[serde(deserialize_with = "de_transaction_from_json")]
     pub transaction: Transaction,
 }
 

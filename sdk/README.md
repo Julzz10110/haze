@@ -86,6 +86,55 @@ const keyPair2 = await KeyPair.fromPrivateKey(privateKeyHex);
 const signature = await keyPair.sign(message);
 ```
 
+### Building and signing a transaction
+
+Every user-signed transaction includes `from` (signer), `fee`, and `nonce`. The client signs the **canonical byte payload** (see node `get_transaction_data_for_signing`); the SDK’s `encodeTransaction` matches that format.
+
+**Transfer:**
+
+```typescript
+const tx = TransactionBuilder.createTransfer(
+  fromAddress,  // Uint8Array (32 bytes)
+  toAddress,
+  amount,       // bigint
+  fee,          // bigint
+  nonce        // number
+);
+const signedTx = await TransactionBuilder.sign(tx, keyPair);
+await client.sendTransaction(signedTx);
+```
+
+**Mistborn asset (Create / Condense / etc.):**
+
+```typescript
+const assetTx = MistbornAsset.createCreateTransaction(
+  assetId,
+  ownerAddress,  // also used as `from` (signer)
+  DensityLevel.Ethereal,
+  { name: 'My NFT' },
+  []
+);
+// Set fee/nonce if needed: assetTx.fee = 0n; assetTx.nonce = 0;
+const signed = await MistbornAsset.sign(assetTx, keyPair);
+await client.sendTransaction(signed);
+```
+
+**Stake:**
+
+```typescript
+const stakeTx = TransactionBuilder.createStake(
+  fromAddress,
+  validatorAddress,
+  amount,
+  fee,
+  nonce
+);
+const signedTx = await TransactionBuilder.sign(stakeTx, keyPair);
+await client.sendTransaction(signedTx);
+```
+
+The API expects JSON with byte fields as **hex strings**. See [API transaction contract](../docs/API_TRANSACTIONS.md) for the full request shape.
+
 ### TransactionBuilder
 
 Build and sign transactions.
@@ -215,22 +264,16 @@ npm run clean
 
 ## API Endpoints
 
-The SDK communicates with HAZE nodes via REST API:
+The SDK communicates with HAZE nodes via REST API. Full list and transaction contract (hex fields, `from`/`fee`/`nonce`): [API transaction contract](../docs/API_TRANSACTIONS.md).
 
 - `GET /health` - Health check
 - `GET /api/v1/blockchain/info` - Blockchain information
+- `GET /api/v1/metrics/basic` - Basic metrics
 - `POST /api/v1/transactions` - Send transaction
 - `GET /api/v1/transactions/:hash` - Get transaction
-- `GET /api/v1/accounts/:address` - Get account info
-- `GET /api/v1/accounts/:address/balance` - Get balance
-- `GET /api/v1/assets/:asset_id` - Get asset info
-- `GET /api/v1/economy/pools` - Get liquidity pools
-- `POST /api/v1/economy/pools` - Create liquidity pool
-
-## TypeScript Support
-
-Full TypeScript definitions are included. The SDK is written in TypeScript and provides complete type safety.
-
-## License
-
-MIT
+- `GET /api/v1/accounts/:address`, `GET .../balance` - Account
+- `GET /api/v1/assets/:asset_id`, `POST /api/v1/assets` - Assets; `.../history`, `.../versions`, `.../snapshot`, `GET /api/v1/assets/search`
+- `POST /api/v1/assets/:asset_id/condense`, `evaporate`, `merge`, `split`; `POST /api/v1/assets/estimate-gas`; `GET|POST .../permissions`; `GET .../export`, `POST .../import`
+- `GET /api/v1/economy/pools`, `POST /api/v1/economy/pools`, `GET .../pools/:pool_id`
+- `POST /api/v1/sync/start`, `GET /api/v1/sync/status` - Sync
+- `WS /api/v1/ws` - WebSocket
