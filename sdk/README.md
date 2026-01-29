@@ -255,12 +255,20 @@ npm install
 # Build
 npm run build
 
-# Watch mode
+# Run tests (Vitest)
+npm test
+
+# Watch mode for tests
+npm run test:watch
+
+# Watch mode for build
 npm run dev
 
 # Clean
 npm run clean
 ```
+
+Tests cover `getTransactionDataForSigning` (canonical payload for all transaction types), `TransactionBuilder` (createTransfer, createStake, sign), and `MistbornAsset` builders (createCreateTransaction, createUpdateTransaction, etc., including `from`/`fee`/`nonce`).
 
 ## API Endpoints
 
