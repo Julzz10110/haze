@@ -89,71 +89,71 @@ pub enum Transaction {
         amount: u64,
         fee: u64,
         nonce: u64,
+        #[serde(default)]
+        chain_id: Option<u64>,
+        #[serde(default)]
+        valid_until_height: Option<u64>,
         signature: Vec<u8>,
     },
 
     /// Execute smart contract
     ContractCall {
-        /// Account that authorizes the call and pays fees
         from: Address,
-        /// Target contract address
         contract: Address,
-        /// Method name on the contract
         method: String,
-        /// Encoded arguments for the method
         args: Vec<u8>,
-        /// Gas limit for this call
         gas_limit: u64,
-        /// Fee paid by `from` for this call
         fee: u64,
-        /// Nonce of the `from` account (anti-replay)
         nonce: u64,
-        /// Signature from `from` over the canonical signing payload
+        #[serde(default)]
+        chain_id: Option<u64>,
+        #[serde(default)]
+        valid_until_height: Option<u64>,
         signature: Vec<u8>,
     },
 
     /// Create or update Mistborn NFT
     MistbornAsset {
-        /// Account that authorizes and pays for this asset operation
         from: Address,
         action: AssetAction,
         asset_id: Hash,
         data: AssetData,
-        /// Fee paid by `from` for this operation
         fee: u64,
-        /// Nonce of the `from` account
         nonce: u64,
-        /// Signature from `from`
+        #[serde(default)]
+        chain_id: Option<u64>,
+        #[serde(default)]
+        valid_until_height: Option<u64>,
         signature: Vec<u8>,
     },
 
     /// Stake tokens for validation
     Stake {
-        /// Account that stakes and pays fees
         from: Address,
         validator: Address,
         amount: u64,
-        /// Fee paid by `from` for this stake
         fee: u64,
-        /// Nonce of the `from` account
         nonce: u64,
-        /// Signature from `from`
+        #[serde(default)]
+        chain_id: Option<u64>,
+        #[serde(default)]
+        valid_until_height: Option<u64>,
         signature: Vec<u8>,
     },
 
     /// Set asset permissions (owner only)
     SetAssetPermissions {
-        /// Account that authorizes and pays for this permissions change
         from: Address,
         asset_id: Hash,
         permissions: Vec<AssetPermission>,
         public_read: bool,
         owner: Address,
-        /// Fee paid by `from` for this operation
         fee: u64,
-        /// Nonce of the `from` account
         nonce: u64,
-        /// Signature from `from`
+        #[serde(default)]
+        chain_id: Option<u64>,
+        #[serde(default)]
+        valid_until_height: Option<u64>,
         signature: Vec<u8>,
     },
 }
@@ -285,6 +285,8 @@ mod tests {
             amount: 1000,
             fee: 10,
             nonce: 1,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![],
         };
         

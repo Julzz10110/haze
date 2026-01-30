@@ -218,5 +218,75 @@ describe('getTransactionDataForSigning', () => {
       // After "MistbornAsset"(13) + from(32) = 45, next byte is action
       expect(payload[45]).toBe(0);
     });
+
+    it('Merge action includes other_asset_id in payload when in metadata', () => {
+      const otherId = bytes32(99);
+      const otherIdHex = Buffer.from(otherId).toString('hex');
+      const payloadWith = getTransactionDataForSigning({
+        type: 'MistbornAsset',
+        from: bytes32(1),
+        action: AssetAction.Merge,
+        asset_id: bytes32(10),
+        data: {
+          density: DensityLevel.Ethereal,
+          metadata: { _other_asset_id: otherIdHex },
+          attributes: [],
+          owner: bytes32(1),
+        },
+        fee: 0n,
+        nonce: 0,
+        signature: new Uint8Array(0),
+      });
+      const payloadWithout = getTransactionDataForSigning({
+        type: 'MistbornAsset',
+        from: bytes32(1),
+        action: AssetAction.Merge,
+        asset_id: bytes32(10),
+        data: {
+          density: DensityLevel.Ethereal,
+          metadata: {},
+          attributes: [],
+          owner: bytes32(1),
+        },
+        fee: 0n,
+        nonce: 0,
+        signature: new Uint8Array(0),
+      });
+      expect(payloadWith.length).toBeGreaterThan(payloadWithout.length);
+    });
+
+    it('Split action includes _components in payload when in metadata', () => {
+      const payloadWith = getTransactionDataForSigning({
+        type: 'MistbornAsset',
+        from: bytes32(1),
+        action: AssetAction.Split,
+        asset_id: bytes32(10),
+        data: {
+          density: DensityLevel.Ethereal,
+          metadata: { _components: 'id1,id2' },
+          attributes: [],
+          owner: bytes32(1),
+        },
+        fee: 0n,
+        nonce: 0,
+        signature: new Uint8Array(0),
+      });
+      const payloadWithout = getTransactionDataForSigning({
+        type: 'MistbornAsset',
+        from: bytes32(1),
+        action: AssetAction.Split,
+        asset_id: bytes32(10),
+        data: {
+          density: DensityLevel.Ethereal,
+          metadata: {},
+          attributes: [],
+          owner: bytes32(1),
+        },
+        fee: 0n,
+        nonce: 0,
+        signature: new Uint8Array(0),
+      });
+      expect(payloadWith.length).toBeGreaterThan(payloadWithout.length);
+    });
   });
 });

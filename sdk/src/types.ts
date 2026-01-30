@@ -77,6 +77,8 @@ export interface TransferTransaction {
   amount: bigint;
   fee: bigint;
   nonce: number;
+  chain_id?: number;
+  valid_until_height?: number;
   signature: Uint8Array;
 }
 
@@ -94,6 +96,8 @@ export interface MistbornAssetTransaction {
   fee: bigint;
   /** Nonce for the `from` account */
   nonce: number;
+  chain_id?: number;
+  valid_until_height?: number;
   signature: Uint8Array;
 }
 
@@ -112,6 +116,8 @@ export interface ContractCallTransaction {
   fee: bigint;
   /** Nonce for the `from` account */
   nonce: number;
+  chain_id?: number;
+  valid_until_height?: number;
   signature: Uint8Array;
 }
 
@@ -129,6 +135,8 @@ export interface StakeTransaction {
   fee: bigint;
   /** Nonce for the `from` account */
   nonce: number;
+  chain_id?: number;
+  valid_until_height?: number;
   signature: Uint8Array;
 }
 

@@ -98,6 +98,8 @@ async fn e2e_estimate_gas_create() {
         },
         fee: 0,
         nonce: 0,
+        chain_id: None,
+        valid_until_height: None,
         signature: vec![0; 64],
     };
 

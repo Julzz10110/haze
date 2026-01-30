@@ -1,0 +1,250 @@
+openapi: 3.0.3
+info:
+  title: HAZE Blockchain REST API
+  description: REST API for transactions, blocks, accounts, Mistborn assets, Fog economy.
+  version: 0.1.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local node
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: OK
+
+  /api/v1/blockchain/info:
+    get:
+      summary: Get blockchain info
+      responses:
+        "200":
+          description: Blockchain info
+
+  /api/v1/transactions:
+    post:
+      summary: Submit a signed transaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction]
+              properties:
+                transaction: {}
+      responses:
+        "200":
+          description: Transaction accepted
+        "400":
+          description: Invalid transaction
+
+  /api/v1/transactions/{hash}:
+    get:
+      summary: Get transaction by hash
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Transaction status
+
+  /api/v1/blocks/{hash}:
+    get:
+      summary: Get block by hash
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Block info
+
+  /api/v1/blocks/height/{height}:
+    get:
+      summary: Get block by height
+      parameters:
+        - name: height
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Block info
+
+  /api/v1/accounts/{address}:
+    get:
+      summary: Get account info
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Account info
+
+  /api/v1/accounts/{address}/balance:
+    get:
+      summary: Get account balance
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Balance
+
+  /api/v1/assets/{asset_id}:
+    get:
+      summary: Get asset info
+      parameters:
+        - name: asset_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Asset info
+    post:
+      summary: Create asset (signed MistbornAsset Create)
+      parameters:
+        - name: asset_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction]
+              properties:
+                transaction: {}
+      responses:
+        "200":
+          description: Transaction accepted
+
+  /api/v1/assets/{asset_id}/condense:
+    post:
+      summary: Condense asset
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction]
+              properties:
+                transaction: {}
+      responses:
+        "200":
+          description: Transaction accepted
+
+  /api/v1/assets/{asset_id}/evaporate:
+    post:
+      summary: Evaporate asset
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction]
+              properties:
+                transaction: {}
+      responses:
+        "200":
+          description: Transaction accepted
+
+  /api/v1/assets/{asset_id}/merge:
+    post:
+      summary: Merge assets
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction]
+              properties:
+                transaction: {}
+      responses:
+        "200":
+          description: Transaction accepted
+
+  /api/v1/assets/{asset_id}/split:
+    post:
+      summary: Split asset
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction]
+              properties:
+                transaction: {}
+      responses:
+        "200":
+          description: Transaction accepted
+
+  /api/v1/assets/estimate-gas:
+    post:
+      summary: Estimate gas for Mistborn transaction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction]
+              properties:
+                transaction: {}
+      responses:
+        "200":
+          description: Gas estimate
+
+  /api/v1/economy/pools:
+    get:
+      summary: Get all liquidity pools
+      responses:
+        "200":
+          description: List of pools
+    post:
+      summary: Create liquidity pool
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                asset1: { type: string }
+                asset2: { type: string }
+                reserve1: { type: string }
+                reserve2: { type: string }
+                fee_rate: { type: number }
+      responses:
+        "200":
+          description: Pool created
+
+  /api/v1/economy/pools/{pool_id}:
+    get:
+      summary: Get liquidity pool by ID
+      parameters:
+        - name: pool_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pool info

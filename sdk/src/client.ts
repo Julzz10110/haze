@@ -13,7 +13,7 @@ import {
   LiquidityPool,
   Transaction,
 } from './types';
-import { bytesToHex, hexToBytes } from './utils';
+import { encodeTransactionForApi } from './transaction';
 
 export interface HazeClientConfig {
   baseUrl: string;
@@ -74,7 +74,7 @@ export class HazeClient {
     try {
       const response = await this.axios.post<ApiResponse<TransactionResponse>>(
         '/api/v1/transactions',
-        { transaction: this.serializeTransaction(transaction) }
+        { transaction: encodeTransactionForApi(transaction) }
       );
       if (!response.data.success || !response.data.data) {
         throw new Error(response.data.error || 'Failed to send transaction');
@@ -240,30 +240,4 @@ export class HazeClient {
     return response.data.data;
   }
 
-  /**
-   * Serialize transaction for API
-   */
-  private serializeTransaction(tx: Transaction): any {
-    const serialize = (obj: any): any => {
-      if (obj instanceof Uint8Array) {
-        return bytesToHex(obj);
-      }
-      if (typeof obj === 'bigint') {
-        return obj.toString();
-      }
-      if (Array.isArray(obj)) {
-        return obj.map(serialize);
-      }
-      if (obj && typeof obj === 'object') {
-        const result: any = {};
-        for (const [key, value] of Object.entries(obj)) {
-          result[key] = serialize(value);
-        }
-        return result;
-      }
-      return obj;
-    };
-
-    return serialize(tx);
-  }
 }

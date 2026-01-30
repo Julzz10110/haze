@@ -199,6 +199,8 @@ fn parse_transaction_from_value(v: &serde_json::Value) -> Result<Transaction, St
             let amount = u64_from_value(inner.get("amount").ok_or("missing amount")?)?;
             let fee = u64_from_value(inner.get("fee").ok_or("missing fee")?)?;
             let nonce = u64_from_value(inner.get("nonce").ok_or("missing nonce")?)?;
+            let chain_id = inner.get("chain_id").and_then(|c| u64_from_value(c).ok());
+            let valid_until_height = inner.get("valid_until_height").and_then(|h| u64_from_value(h).ok());
             let signature = bytes_from_value(inner.get("signature").ok_or("missing signature")?)?;
             Ok(Transaction::Transfer {
                 from,
@@ -206,6 +208,8 @@ fn parse_transaction_from_value(v: &serde_json::Value) -> Result<Transaction, St
                 amount,
                 fee,
                 nonce,
+                chain_id,
+                valid_until_height,
                 signature,
             })
         }
@@ -221,6 +225,8 @@ fn parse_transaction_from_value(v: &serde_json::Value) -> Result<Transaction, St
             let gas_limit = u64_from_value(inner.get("gas_limit").ok_or("missing gas_limit")?)?;
             let fee = u64_from_value(inner.get("fee").ok_or("missing fee")?)?;
             let nonce = u64_from_value(inner.get("nonce").ok_or("missing nonce")?)?;
+            let chain_id = inner.get("chain_id").and_then(|c| u64_from_value(c).ok());
+            let valid_until_height = inner.get("valid_until_height").and_then(|h| u64_from_value(h).ok());
             let signature = bytes_from_value(inner.get("signature").ok_or("missing signature")?)?;
             Ok(Transaction::ContractCall {
                 from,
@@ -230,6 +236,8 @@ fn parse_transaction_from_value(v: &serde_json::Value) -> Result<Transaction, St
                 gas_limit,
                 fee,
                 nonce,
+                chain_id,
+                valid_until_height,
                 signature,
             })
         }
@@ -248,6 +256,8 @@ fn parse_transaction_from_value(v: &serde_json::Value) -> Result<Transaction, St
             let data = asset_data_from_value(inner.get("data").ok_or("missing data")?)?;
             let fee = u64_from_value(inner.get("fee").ok_or("missing fee")?)?;
             let nonce = u64_from_value(inner.get("nonce").ok_or("missing nonce")?)?;
+            let chain_id = inner.get("chain_id").and_then(|c| u64_from_value(c).ok());
+            let valid_until_height = inner.get("valid_until_height").and_then(|h| u64_from_value(h).ok());
             let signature = bytes_from_value(inner.get("signature").ok_or("missing signature")?)?;
             Ok(Transaction::MistbornAsset {
                 from,
@@ -256,6 +266,8 @@ fn parse_transaction_from_value(v: &serde_json::Value) -> Result<Transaction, St
                 data,
                 fee,
                 nonce,
+                chain_id,
+                valid_until_height,
                 signature,
             })
         }
@@ -265,6 +277,8 @@ fn parse_transaction_from_value(v: &serde_json::Value) -> Result<Transaction, St
             let amount = u64_from_value(inner.get("amount").ok_or("missing amount")?)?;
             let fee = u64_from_value(inner.get("fee").ok_or("missing fee")?)?;
             let nonce = u64_from_value(inner.get("nonce").ok_or("missing nonce")?)?;
+            let chain_id = inner.get("chain_id").and_then(|c| u64_from_value(c).ok());
+            let valid_until_height = inner.get("valid_until_height").and_then(|h| u64_from_value(h).ok());
             let signature = bytes_from_value(inner.get("signature").ok_or("missing signature")?)?;
             Ok(Transaction::Stake {
                 from,
@@ -272,6 +286,8 @@ fn parse_transaction_from_value(v: &serde_json::Value) -> Result<Transaction, St
                 amount,
                 fee,
                 nonce,
+                chain_id,
+                valid_until_height,
                 signature,
             })
         }
@@ -1071,6 +1087,8 @@ async fn set_asset_permissions(
         owner,
         fee: 0,
         nonce: 0,
+        chain_id: None,
+        valid_until_height: None,
         signature: req.signature,
     };
     let tx_hash = tx.hash();
@@ -1211,6 +1229,8 @@ async fn import_asset(
         data,
         fee: 0,
         nonce: 0,
+        chain_id: None,
+        valid_until_height: None,
         signature,
     };
     let tx_hash = tx.hash();

@@ -247,34 +247,34 @@ impl ConsensusEngine {
                 // Check nonce
                 self.validate_nonce(tx)?;
             }
-            Transaction::Stake { validator, amount, signature, .. } => {
+            Transaction::Stake { from, amount, signature, .. } => {
                 if *amount == 0 {
                     return Err(crate::error::HazeError::InvalidTransaction(
                         "Stake amount cannot be zero".to_string()
                     ));
                 }
 
-                // Verify signature
                 if signature.is_empty() {
                     return Err(crate::error::HazeError::InvalidTransaction(
                         "Transaction signature is empty".to_string()
                     ));
                 }
-                self.verify_transaction_signature(tx, validator)?;
+                // Signer is always `from` (the staker)
+                self.verify_transaction_signature(tx, from)?;
             }
-            Transaction::ContractCall { gas_limit, signature, .. } => {
+            Transaction::ContractCall { from, gas_limit, signature, .. } => {
                 if *gas_limit == 0 {
                     return Err(crate::error::HazeError::InvalidTransaction(
                         "Gas limit cannot be zero".to_string()
                     ));
                 }
 
-                // Basic signature validation
                 if signature.is_empty() {
                     return Err(crate::error::HazeError::InvalidTransaction(
                         "Transaction signature is empty".to_string()
                     ));
                 }
+                self.verify_transaction_signature(tx, from)?;
             }
             Transaction::MistbornAsset { data, signature, .. } => {
                 // Verify signature
@@ -295,6 +295,30 @@ impl ConsensusEngine {
                     ));
                 }
                 self.verify_transaction_signature(tx, owner)?;
+            }
+        }
+
+        // Replay & chain boundaries
+        let current_height = self.state.current_height();
+        let (chain_id, valid_until_height) = match tx {
+            Transaction::Transfer { chain_id, valid_until_height, .. } => (chain_id.as_ref(), valid_until_height.as_ref()),
+            Transaction::ContractCall { chain_id, valid_until_height, .. } => (chain_id.as_ref(), valid_until_height.as_ref()),
+            Transaction::MistbornAsset { chain_id, valid_until_height, .. } => (chain_id.as_ref(), valid_until_height.as_ref()),
+            Transaction::Stake { chain_id, valid_until_height, .. } => (chain_id.as_ref(), valid_until_height.as_ref()),
+            Transaction::SetAssetPermissions { chain_id, valid_until_height, .. } => (chain_id.as_ref(), valid_until_height.as_ref()),
+        };
+        if let Some(cid) = chain_id {
+            if *cid != self.config.chain_id {
+                return Err(crate::error::HazeError::InvalidTransaction(
+                    "Transaction chain_id does not match node".to_string()
+                ));
+            }
+        }
+        if let Some(vuh) = valid_until_height {
+            if current_height > *vuh {
+                return Err(crate::error::HazeError::InvalidTransaction(
+                    "Transaction valid_until_height has passed".to_string()
+                ));
             }
         }
 
@@ -501,13 +525,23 @@ impl ConsensusEngine {
         current_nonce + pending_count
     }
 
+    /// Append optional chain_id and valid_until_height to signing payload (canonical order).
+    fn append_chain_fields(payload: &mut Vec<u8>, chain_id: Option<u64>, valid_until_height: Option<u64>) {
+        if let Some(c) = chain_id {
+            payload.extend_from_slice(&c.to_le_bytes());
+        }
+        if let Some(v) = valid_until_height {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+
     /// Get transaction data for signing (transaction without signature field)
     ///
     /// Creates a serialized representation of the transaction without the signature
     /// for use in signature verification. The data format matches what was signed.
     fn get_transaction_data_for_signing(&self, tx: &Transaction) -> Vec<u8> {
         match tx {
-            Transaction::Transfer { from, to, amount, fee, nonce, .. } => {
+            Transaction::Transfer { from, to, amount, fee, nonce, chain_id, valid_until_height, .. } => {
                 let mut data = Vec::new();
                 data.extend_from_slice(b"Transfer");
                 data.extend_from_slice(from);
@@ -515,9 +549,10 @@ impl ConsensusEngine {
                 data.extend_from_slice(&amount.to_le_bytes());
                 data.extend_from_slice(&fee.to_le_bytes());
                 data.extend_from_slice(&nonce.to_le_bytes());
+                Self::append_chain_fields(&mut data, *chain_id, *valid_until_height);
                 data
             }
-            Transaction::ContractCall { from, contract, method, args, gas_limit, fee, nonce, .. } => {
+            Transaction::ContractCall { from, contract, method, args, gas_limit, fee, nonce, chain_id, valid_until_height, .. } => {
                 let mut data = Vec::new();
                 data.extend_from_slice(b"ContractCall");
                 data.extend_from_slice(from);
@@ -528,9 +563,10 @@ impl ConsensusEngine {
                 data.extend_from_slice(&fee.to_le_bytes());
                 data.extend_from_slice(&nonce.to_le_bytes());
                 data.extend_from_slice(args);
+                Self::append_chain_fields(&mut data, *chain_id, *valid_until_height);
                 data
             }
-            Transaction::MistbornAsset { from, action, asset_id, data, fee, nonce, .. } => {
+            Transaction::MistbornAsset { from, action, asset_id, data, fee, nonce, chain_id, valid_until_height, .. } => {
                 // Serialize asset data for signing
                 let mut serialized = Vec::new();
                 serialized.extend_from_slice(b"MistbornAsset");
@@ -575,10 +611,11 @@ impl ConsensusEngine {
                 // Common fee/nonce fields for MistbornAsset
                 serialized.extend_from_slice(&fee.to_le_bytes());
                 serialized.extend_from_slice(&nonce.to_le_bytes());
+                Self::append_chain_fields(&mut serialized, *chain_id, *valid_until_height);
 
                 serialized
             }
-            Transaction::Stake { from, validator, amount, fee, nonce, .. } => {
+            Transaction::Stake { from, validator, amount, fee, nonce, chain_id, valid_until_height, .. } => {
                 let mut data = Vec::new();
                 data.extend_from_slice(b"Stake");
                 data.extend_from_slice(from);
@@ -586,9 +623,10 @@ impl ConsensusEngine {
                 data.extend_from_slice(&amount.to_le_bytes());
                 data.extend_from_slice(&fee.to_le_bytes());
                 data.extend_from_slice(&nonce.to_le_bytes());
+                Self::append_chain_fields(&mut data, *chain_id, *valid_until_height);
                 data
             }
-            Transaction::SetAssetPermissions { from, asset_id, permissions, public_read, owner, fee, nonce, .. } => {
+            Transaction::SetAssetPermissions { from, asset_id, permissions, public_read, owner, fee, nonce, chain_id, valid_until_height, .. } => {
                 let mut data = Vec::new();
                 data.extend_from_slice(b"SetAssetPermissions");
                 data.extend_from_slice(from);
@@ -600,6 +638,7 @@ impl ConsensusEngine {
                 data.extend_from_slice(&perm_bytes);
                 data.extend_from_slice(&fee.to_le_bytes());
                 data.extend_from_slice(&nonce.to_le_bytes());
+                Self::append_chain_fields(&mut data, *chain_id, *valid_until_height);
                 data
             }
         }
@@ -1231,6 +1270,8 @@ mod tests {
             amount: 1000,
             fee: 10,
             nonce: 0, // Correct nonce for new account
+            chain_id: None,
+            valid_until_height: None,
             signature,
         };
         
@@ -1277,6 +1318,8 @@ mod tests {
             amount: 1000,
             fee: 10,
             nonce: 0, // Correct nonce for new account
+            chain_id: None,
+            valid_until_height: None,
             signature,
         };
         
@@ -1300,6 +1343,8 @@ mod tests {
             amount: 1000,
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![], // Empty signature
         };
         
@@ -1325,6 +1370,8 @@ mod tests {
             owner,
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![], // Empty signature
         };
 
@@ -1363,6 +1410,8 @@ mod tests {
             amount: 1000,
             fee: 10,
             nonce: 0, // Correct nonce for new account
+            chain_id: None,
+            valid_until_height: None,
             signature,
         };
         
@@ -1406,6 +1455,8 @@ mod tests {
             amount: 1000,
             fee: 10,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: signature_1,
         };
         
@@ -1431,6 +1482,8 @@ mod tests {
             amount: 500,
             fee: 10,
             nonce: 0, // Duplicate nonce
+            chain_id: None,
+            valid_until_height: None,
             signature: signature_2,
         };
         
@@ -1474,6 +1527,8 @@ mod tests {
             amount: 1000,
             fee: 10,
             nonce: 1, // Correct: matches current account nonce
+            chain_id: None,
+            valid_until_height: None,
             signature,
         };
         
@@ -1515,6 +1570,8 @@ mod tests {
             amount: 1000,
             fee: 10,
             nonce: 5, // Too high: account has nonce 0, expected is 0
+            chain_id: None,
+            valid_until_height: None,
             signature,
         };
         

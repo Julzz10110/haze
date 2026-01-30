@@ -20,7 +20,11 @@ pub struct ApiConfig {
 pub struct Config {
     /// Node identity
     pub node_id: String,
-    
+
+    /// Chain identifier; transactions with chain_id set are only accepted when they match.
+    #[serde(default)]
+    pub chain_id: u64,
+
     /// Network configuration
     pub network: NetworkConfig,
     
@@ -234,6 +238,7 @@ impl Config {
     pub fn default() -> Self {
         Self {
             node_id: uuid::Uuid::new_v4().to_string(),
+            chain_id: 0,
             network: NetworkConfig {
                 listen_addr: "/ip4/0.0.0.0/tcp/9000".to_string(),
                 bootstrap_nodes: vec![],

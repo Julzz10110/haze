@@ -4,7 +4,38 @@
 
 import { KeyPair, signTransaction } from './crypto';
 import { Transaction, TransferTransaction, StakeTransaction, Address } from './types';
-import { sha256 } from './utils';
+import { sha256, bytesToHex } from './utils';
+
+/**
+ * Serialize a value for API JSON: Uint8Array -> hex, bigint -> string, nested objects recursively.
+ */
+function serializeForApi(value: unknown): unknown {
+  if (value instanceof Uint8Array) {
+    return bytesToHex(value);
+  }
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+  if (Array.isArray(value)) {
+    return value.map(serializeForApi);
+  }
+  if (value !== null && typeof value === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      result[key] = serializeForApi(val);
+    }
+    return result;
+  }
+  return value;
+}
+
+/**
+ * Encode transaction to API format (hex strings for bytes, decimal strings for bigint).
+ * Use this when sending transactions to the REST API.
+ */
+export function encodeTransactionForApi(tx: Transaction): Record<string, unknown> {
+  return serializeForApi(tx) as Record<string, unknown>;
+}
 
 /**
  * Transaction builder

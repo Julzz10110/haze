@@ -1814,6 +1814,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64], // Dummy signature for test
         };
         
@@ -1844,6 +1846,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![2; 64],
         };
         
@@ -1867,6 +1871,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![3; 64],
         };
         
@@ -1913,6 +1919,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         
@@ -1933,6 +1941,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![2; 64],
         };
         
@@ -1955,6 +1965,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![3; 64],
         };
         
@@ -2002,6 +2014,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         
@@ -2025,6 +2039,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![2; 64],
         };
         
@@ -2082,6 +2098,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         
@@ -2104,6 +2122,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![2; 64],
         };
         
@@ -2145,6 +2165,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         
@@ -2183,6 +2205,8 @@ mod tests {
                 },
                 fee: 0,
                 nonce: 0,
+                chain_id: None,
+                valid_until_height: None,
                 signature: vec![1; 64],
             };
             state_manager.apply_transaction(&tx).unwrap();
@@ -2203,6 +2227,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![2; 64],
         };
         state_manager.apply_transaction(&tx2).unwrap();
@@ -2237,6 +2263,8 @@ mod tests {
                 },
                 fee: 0,
                 nonce: 0,
+                chain_id: None,
+                valid_until_height: None,
                 signature: vec![1; 64],
             };
             state_manager.apply_transaction(&tx).unwrap();
@@ -2272,6 +2300,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         
@@ -2333,6 +2363,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         
@@ -2355,6 +2387,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![2; 64],
         };
         
@@ -2395,6 +2429,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         state_manager.apply_transaction(&tx).unwrap();
@@ -2427,6 +2463,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         state_manager.apply_transaction(&create_tx).unwrap();
@@ -2445,6 +2483,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![2; 64],
         };
         state_manager.apply_transaction(&evap_tx).unwrap();
@@ -2477,6 +2517,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         let res = state_manager.apply_transaction(&tx);
@@ -2507,6 +2549,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         state_manager.apply_transaction(&create_tx).unwrap();
@@ -2524,6 +2568,8 @@ mod tests {
             owner,
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![2; 64],
         };
         state_manager.apply_transaction(&set_tx).unwrap();
@@ -2561,6 +2607,8 @@ mod tests {
                 },
                 fee: 0,
                 nonce: 0,
+                chain_id: None,
+                valid_until_height: None,
                 signature: vec![id[0]; 64],
             };
             state_manager.apply_transaction(&tx).unwrap();
@@ -2597,6 +2645,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         state_manager.apply_transaction(&create_tx).unwrap();
@@ -2614,6 +2664,8 @@ mod tests {
             owner,
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![2; 64],
         };
         state_manager.apply_transaction(&set_tx).unwrap();
@@ -2633,6 +2685,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![3; 64],
         };
         state_manager.apply_transaction(&update_tx).unwrap();
@@ -2667,6 +2721,8 @@ mod tests {
             },
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature: vec![1; 64],
         };
         state_manager.apply_transaction(&tx).unwrap();

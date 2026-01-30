@@ -170,6 +170,16 @@ function densityToByte(density: DensityLevel): number {
   }
 }
 
+/** Append optional chain_id and valid_until_height to payload (canonical order; must match Rust). */
+function appendChainFields(parts: Uint8Array[], chainId?: number, validUntilHeight?: number): void {
+  if (chainId !== undefined) {
+    parts.push(u64le(BigInt(chainId)));
+  }
+  if (validUntilHeight !== undefined) {
+    parts.push(u64le(BigInt(validUntilHeight)));
+  }
+}
+
 /**
  * Must exactly match Rust `ConsensusEngine::get_transaction_data_for_signing`.
  */
@@ -178,27 +188,31 @@ export function getTransactionDataForSigning(tx: Transaction): Uint8Array {
 
   switch (tx.type) {
     case 'Transfer': {
-      return concatBytes([
+      const parts: Uint8Array[] = [
         enc.encode('Transfer'),
         tx.from,
         tx.to,
         u64le(tx.amount),
         u64le(tx.fee),
         u64le(BigInt(tx.nonce)),
-      ]);
+      ];
+      appendChainFields(parts, tx.chain_id, tx.valid_until_height);
+      return concatBytes(parts);
     }
     case 'Stake': {
-      return concatBytes([
+      const parts: Uint8Array[] = [
         enc.encode('Stake'),
         tx.from,
         tx.validator,
         u64le(tx.amount),
         u64le(tx.fee),
         u64le(BigInt(tx.nonce)),
-      ]);
+      ];
+      appendChainFields(parts, tx.chain_id, tx.valid_until_height);
+      return concatBytes(parts);
     }
     case 'ContractCall': {
-      return concatBytes([
+      const parts: Uint8Array[] = [
         enc.encode('ContractCall'),
         tx.from,
         tx.contract,
@@ -208,7 +222,9 @@ export function getTransactionDataForSigning(tx: Transaction): Uint8Array {
         u64le(tx.fee),
         u64le(BigInt(tx.nonce)),
         tx.args,
-      ]);
+      ];
+      appendChainFields(parts, tx.chain_id, tx.valid_until_height);
+      return concatBytes(parts);
     }
     case 'MistbornAsset': {
       const parts: Uint8Array[] = [];
@@ -245,6 +261,7 @@ export function getTransactionDataForSigning(tx: Transaction): Uint8Array {
       // Common fee/nonce fields for MistbornAsset
       parts.push(u64le(tx.fee));
       parts.push(u64le(BigInt(tx.nonce)));
+      appendChainFields(parts, tx.chain_id, tx.valid_until_height);
 
       return concatBytes(parts);
     }

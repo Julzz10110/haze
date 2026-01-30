@@ -112,6 +112,8 @@ async fn test_load_create_many_assets() {
             data,
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature,
         };
         
@@ -171,6 +173,8 @@ async fn test_load_batch_operations() {
             data,
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature,
         };
         
@@ -220,6 +224,8 @@ async fn test_load_search_performance() {
             data,
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature,
         };
         

@@ -17,8 +17,8 @@ export { KeyPair } from './crypto';
 // API Client
 export { HazeClient, HazeClientConfig } from './client';
 
-// Transaction builder
-export { TransactionBuilder } from './transaction';
+// Transaction builder and encoding
+export { TransactionBuilder, encodeTransactionForApi } from './transaction';
 
 // Mistborn Assets
 export { MistbornAsset } from './assets';
