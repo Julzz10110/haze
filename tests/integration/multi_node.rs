@@ -111,6 +111,8 @@ async fn test_multi_node_asset_sync() {
         data,
         fee: 0,
         nonce: 0,
+        chain_id: None,
+        valid_until_height: None,
         signature,
     };
     
@@ -172,6 +174,8 @@ async fn test_multi_node_block_chain_sync() {
             data,
             fee: 0,
             nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
             signature,
         };
         
