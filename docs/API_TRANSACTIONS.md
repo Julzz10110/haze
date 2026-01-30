@@ -1,6 +1,8 @@
 # Transaction API contract
 
-All endpoints that accept or return transactions use the same canonical transaction format. Byte fields (addresses, hashes, signatures) are sent as **hex strings** (64 hex chars for 32 bytes). Numeric fields (`amount`, `fee`, `nonce`, `gas_limit`) can be numbers or decimal strings.
+All endpoints that accept or return transactions use the same canonical transaction format.
+
+**See also:** [OpenAPI spec](openapi.yaml), [Mistborn guide](MISTBORN_GUIDE.md). Byte fields (addresses, hashes, signatures) are sent as **hex strings** (64 hex chars for 32 bytes). Numeric fields (`amount`, `fee`, `nonce`, `gas_limit`) can be numbers or decimal strings.
 
 ## Endpoints
 
@@ -25,6 +27,11 @@ Every user-signed transaction includes:
 - **`fee`** (u64) – fee in base units
 - **`nonce`** (u64) – account nonce (replay protection)
 - **`signature`** (bytes, hex) – Ed25519 signature over the canonical signing payload
+
+Optional replay/chain boundary fields (included in signing payload when present):
+
+- **`chain_id`** (u64, optional) – if set, the node accepts the transaction only when its config `chain_id` matches
+- **`valid_until_height`** (u64, optional) – if set, the transaction is rejected when current block height &gt; this value
 
 ### Transfer
 
