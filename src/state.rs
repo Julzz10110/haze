@@ -700,7 +700,23 @@ impl StateManager {
     }
 
     /// Apply block to state
+    /// Blocks must be applied in strict sequential order: height == current_height + 1.
+    /// This prevents reorgs that would decrease current_height.
     pub fn apply_block(&self, block: &Block) -> Result<()> {
+        let current = *self.current_height.read();
+        let next_height = current.checked_add(1).ok_or_else(|| {
+            HazeError::InvalidBlock("Block height overflow".to_string())
+        })?;
+        if block.header.height != next_height {
+            return Err(HazeError::InvalidBlock(
+                format!(
+                    "Block height {} must be current_height+1 ({}); strict sequential apply, no reorg",
+                    block.header.height,
+                    next_height
+                )
+            ));
+        }
+
         // Process block rewards and inflation
         let block_reward = self.tokenomics.process_block_rewards(block.header.height)?;
         
@@ -1779,6 +1795,35 @@ mod tests {
         
         // Initial height should be 0
         assert_eq!(state_manager.current_height(), 0);
+    }
+
+    /// apply_block requires strict sequential height: block.height == current_height + 1.
+    #[test]
+    fn test_apply_block_strict_sequential_height() {
+        use crate::types::{Block, BlockHeader};
+        let config = create_test_config("apply_block_height");
+        let state_manager = StateManager::new(&config).unwrap();
+        assert_eq!(state_manager.current_height(), 0);
+        let addr = create_test_address(1);
+        let block = Block {
+            header: BlockHeader {
+                hash: [0u8; 32],
+                parent_hash: [0u8; 32],
+                height: 2, // wrong: next expected is 1
+                timestamp: 0,
+                validator: addr,
+                merkle_root: [0u8; 32],
+                state_root: [0u8; 32],
+                wave_number: 0,
+                committee_id: 0,
+            },
+            transactions: vec![],
+            dag_references: vec![],
+        };
+        let result = state_manager.apply_block(&block);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("current_height") || err_msg.contains("sequential"), "expected height/sequential error, got: {}", err_msg);
     }
 
     #[test]

@@ -842,6 +842,18 @@ impl ConsensusEngine {
             }
         }
         
+        // Reject blocks at or below finalized height (no revert of finalized blocks)
+        let last_finalized = self.get_last_finalized_height();
+        if block_height <= last_finalized {
+            return Err(crate::error::HazeError::InvalidBlock(
+                format!(
+                    "Block height {} is at or below finalized height {}; finalized blocks cannot be reverted",
+                    block_height,
+                    last_finalized
+                )
+            ));
+        }
+        
         // Optional strict validation, controlled via config
         if self.config.consensus.strict_block_validation {
             let current_height = self.state.current_height();
@@ -1861,5 +1873,35 @@ mod tests {
         // Now should be finalized
         let is_finalized = consensus.check_wave_finalization(wave_num).unwrap();
         assert!(is_finalized);
+    }
+
+    /// Finalized blocks must not be reverted: processing a competing block at or below
+    /// last_finalized_height must be rejected.
+    #[test]
+    fn test_finalized_block_not_reverted() {
+        let config = create_test_config("finalized_no_revert");
+        let state = crate::state::StateManager::new(&config).unwrap();
+        let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
+        let validator = KeyPair::generate().address();
+
+        let block_a = consensus.create_block(validator).unwrap();
+        consensus.process_block(&block_a).unwrap();
+        let wave_num = block_a.header.wave_number;
+        consensus.finalize_wave(wave_num).unwrap();
+        assert_eq!(consensus.get_last_finalized_height(), 1);
+
+        // Competing block at same height (different hash) must be rejected
+        let mut header_b = block_a.header.clone();
+        header_b.parent_hash = [2u8; 32]; // different parent -> different hash
+        header_b.hash = header_b.compute_hash();
+        let block_b = crate::types::Block {
+            header: header_b,
+            transactions: vec![],
+            dag_references: vec![[0u8; 32]],
+        };
+        let result = consensus.process_block(&block_b);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("finalized") || err_msg.contains("Finalized"), "expected finalized-related error, got: {}", err_msg);
     }
 }
