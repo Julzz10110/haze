@@ -1,7 +1,7 @@
 //! E2E API integration tests
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -31,6 +31,7 @@ fn create_test_api_state() -> ApiState {
         state,
         config,
         ws_tx,
+        connected_peers: Arc::new(AtomicUsize::new(0)),
     }
 }
 

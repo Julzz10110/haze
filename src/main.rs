@@ -22,6 +22,7 @@ use tracing::{info, error};
 use crate::types::{address_to_hex, hash_to_hex};
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use crate::config::Config;
 use crate::network::Network;
@@ -74,8 +75,9 @@ async fn main() -> Result<()> {
     info!("✓ Validator keypair generated");
     info!("  Validator address: {}", address_to_hex(&validator_address));
 
-    // Initialize network
-    let mut network = Network::new(config.clone(), consensus.clone()).await?;
+    // Shared counter for connected peers (exposed via API sync status / metrics)
+    let connected_peers = Arc::new(AtomicUsize::new(0));
+    let mut network = Network::new(config.clone(), consensus.clone(), Some(connected_peers.clone())).await?;
     info!("✓ Network layer initialized");
     info!("  Listening on: {}", config.network.listen_addr);
     info!("  Connected peers: {}", network.connected_peers_count());
@@ -93,6 +95,7 @@ async fn main() -> Result<()> {
         state: state_manager.clone(),
         config: config.clone(),
         ws_tx: ws_tx.clone(),
+        connected_peers: connected_peers.clone(),
     };
     info!("✓ API server state initialized");
 

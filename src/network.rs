@@ -6,6 +6,7 @@
 //! - Node types (core, edge, light, mobile)
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -41,6 +42,9 @@ pub enum NetworkEvent {
 const BLOCKS_PROTOCOL_NAME: &[u8] = b"/haze/blocks/1.0.0";
 /// Protocol name for transactions
 const TRANSACTIONS_PROTOCOL_NAME: &[u8] = b"/haze/transactions/1.0.0";
+
+/// Batch size for catch-up sync (blocks per request)
+const SYNC_BATCH_SIZE: u64 = 100;
 
 /// Request types for request-response protocol
 #[derive(Debug, Clone)]
@@ -303,12 +307,20 @@ pub struct Network {
     config: Config,
     consensus: Arc<ConsensusEngine>,
     connected_peers: HashSet<PeerId>,
+    /// Shared counter for API/observability (updated on connect/disconnect)
+    connected_peers_shared: Option<Arc<AtomicUsize>>,
+    /// Catch-up sync: target height we're syncing to (from peer's BlockchainInfo)
+    sync_target_height: Option<u64>,
+    /// Peer we're requesting blocks from during catch-up (same or fallback)
+    sync_peer_id: Option<PeerId>,
 }
 
 impl Network {
+    /// Create network. Pass `connected_peers_shared` to expose peer count to API (e.g. for sync status / metrics).
     pub async fn new(
         config: Config,
         consensus: Arc<ConsensusEngine>,
+        connected_peers_shared: Option<Arc<AtomicUsize>>,
     ) -> HazeResult<Self> {
         tracing::info!("Initializing network layer...");
         tracing::info!("Listen address: {}", config.network.listen_addr);
@@ -353,6 +365,9 @@ impl Network {
             config: config.clone(),
             consensus,
             connected_peers: HashSet::new(),
+            connected_peers_shared,
+            sync_target_height: None,
+            sync_peer_id: None,
         };
 
         // Start listening
@@ -432,11 +447,23 @@ impl Network {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 tracing::info!("Connected to peer: {}", peer_id);
                 self.connected_peers.insert(peer_id);
+                if let Some(ref c) = self.connected_peers_shared {
+                    c.fetch_add(1, Ordering::Relaxed);
+                }
                 let _ = self.event_sender.send(NetworkEvent::PeerConnected(peer_id.to_string()));
             }
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 tracing::info!("Disconnected from peer: {}", peer_id);
                 self.connected_peers.remove(&peer_id);
+                if self.sync_peer_id == Some(peer_id) {
+                    self.sync_peer_id = self.connected_peers.iter().next().cloned();
+                    if self.sync_peer_id.is_none() {
+                        self.sync_target_height = None;
+                    }
+                }
+                if let Some(ref c) = self.connected_peers_shared {
+                    c.fetch_sub(1, Ordering::Relaxed);
+                }
                 let _ = self.event_sender.send(NetworkEvent::PeerDisconnected(peer_id.to_string()));
             }
             SwarmEvent::IncomingConnection { .. } => {
@@ -469,7 +496,7 @@ impl Network {
                 // Handle ping events if needed
                 tracing::debug!("Ping event: {:?}", ping_event);
             }
-            HazeBehaviourEvent::Blocks(libp2p::request_response::Event::Message { message, .. }) => {
+            HazeBehaviourEvent::Blocks(libp2p::request_response::Event::Message { message, peer }) => {
                 match message {
                     libp2p::request_response::Message::Request { request, channel, .. } => {
                         match request {
@@ -615,9 +642,32 @@ impl Network {
                             HazeResponse::Blocks(blocks) => {
                                 tracing::info!("Received {} blocks for sync", blocks.len());
                                 // Process received blocks
-                                for block in blocks {
-                                    if let Err(e) = self.consensus.process_block(&block) {
+                                for block in &blocks {
+                                    if let Err(e) = self.consensus.process_block(block) {
                                         tracing::warn!("Failed to process synced block: {}", e);
+                                    }
+                                }
+                                // Catch-up: if still behind target, request next batch (same or another peer)
+                                if let (Some(target), Some(sync_peer)) = (self.sync_target_height, self.sync_peer_id) {
+                                    let local = self.consensus.state().current_height();
+                                    if local < target {
+                                        let start = local + 1;
+                                        let end = target.min(local + SYNC_BATCH_SIZE);
+                                        let peer_to_use = if self.connected_peers.contains(&sync_peer) {
+                                            sync_peer
+                                        } else {
+                                            self.connected_peers.iter().next().cloned().unwrap_or(sync_peer)
+                                        };
+                                        if let Err(e) = self.request_blocks_by_height(&peer_to_use, start, end) {
+                                            tracing::warn!("Catch-up: failed to request next batch: {}", e);
+                                        } else {
+                                            tracing::info!("Catch-up: requested next batch {}-{} from peer {}", start, end, peer_to_use);
+                                            self.sync_peer_id = Some(peer_to_use);
+                                        }
+                                    } else {
+                                        tracing::info!("Catch-up sync complete: local_height={}, target={}", local, target);
+                                        self.sync_target_height = None;
+                                        self.sync_peer_id = None;
                                     }
                                 }
                             }
@@ -628,24 +678,26 @@ impl Network {
                                 }
                             }
                             HazeResponse::BlockchainInfo(info) => {
-                                tracing::debug!("Received blockchain info: height={}, finalized_height={}, finalized_wave={}", 
-                                    info.current_height, info.last_finalized_height, info.last_finalized_wave);
+                                tracing::debug!("Received blockchain info from {}: height={}, finalized_height={}, finalized_wave={}", 
+                                    peer, info.current_height, info.last_finalized_height, info.last_finalized_wave);
                                 
                                 // Perform light sync comparison
                                 let state = self.consensus.state();
                                 let local_height = state.current_height();
                                 let local_finalized_height = self.consensus.get_last_finalized_height();
                                 
-                                // Check if peer is ahead
+                                // Check if peer is ahead — start catch-up sync
                                 if info.current_height > local_height {
-                                    tracing::info!("Peer is ahead: peer_height={}, local_height={}, requesting sync", 
-                                        info.current_height, local_height);
-                                    // Request missing blocks
+                                    tracing::info!("Peer {} is ahead: peer_height={}, local_height={}, starting catch-up sync", 
+                                        peer, info.current_height, local_height);
+                                    self.sync_target_height = Some(info.current_height);
+                                    self.sync_peer_id = Some(peer);
                                     let start_height = local_height + 1;
-                                    let end_height = info.current_height.min(local_height + 100); // Batch size
-                                    // Clone peer_id to avoid borrow checker issues
-                                    if let Some(peer_id) = self.connected_peers.iter().next().cloned() {
-                                        let _ = self.request_blocks_by_height(&peer_id, start_height, end_height);
+                                    let end_height = info.current_height.min(local_height + SYNC_BATCH_SIZE);
+                                    if let Err(e) = self.request_blocks_by_height(&peer, start_height, end_height) {
+                                        tracing::warn!("Failed to request first sync batch: {}", e);
+                                        self.sync_target_height = None;
+                                        self.sync_peer_id = None;
                                     }
                                 }
                                 

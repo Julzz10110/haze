@@ -9,6 +9,7 @@
 //! - WebSocket for real-time updates
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use axum::{
     extract::{Path, State, ws::WebSocketUpgrade},
     http::StatusCode,
@@ -22,7 +23,7 @@ use tokio::sync::broadcast;
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
-use crate::types::{Transaction, AssetAction, Hash, AssetPermission, PermissionLevel, Address, hash_to_hex, address_to_hex};
+use crate::types::{Transaction, AssetAction, Hash, AssetPermission, PermissionLevel, hash_to_hex, address_to_hex};
 use crate::state::AssetState;
 pub use crate::ws_events::WsEvent;
 
@@ -51,6 +52,8 @@ pub struct ApiState {
     pub state: Arc<StateManager>,
     pub config: Config,
     pub ws_tx: broadcast::Sender<WsEvent>,
+    /// Shared counter of connected P2P peers (updated by network layer)
+    pub connected_peers: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// API response wrapper
@@ -1552,6 +1555,7 @@ pub struct SyncStatus {
     pub last_finalized_height: u64,
     pub last_finalized_wave: u64,
     pub syncing: bool,
+    pub connected_peers: usize,
 }
 
 /// Basic metrics response
@@ -1561,7 +1565,7 @@ pub struct BasicMetrics {
     pub last_finalized_height: u64,
     pub last_finalized_wave: u64,
     pub tx_pool_size: usize,
-    pub connected_peers: usize, // MVP: always 0, network not accessible from API
+    pub connected_peers: usize,
     pub block_time_avg_ms: Option<u64>, // Average block time in ms (if available)
 }
 
@@ -1582,12 +1586,14 @@ async fn get_sync_status(
     let current_height = api_state.state.current_height();
     let last_finalized_height = api_state.consensus.get_last_finalized_height();
     let last_finalized_wave = api_state.consensus.get_last_finalized_wave();
+    let connected_peers = api_state.connected_peers.load(Ordering::Relaxed);
     
     let status = SyncStatus {
         current_height,
         last_finalized_height,
         last_finalized_wave,
         syncing: false, // MVP: always false, sync is automatic
+        connected_peers,
     };
     
     Ok(Json(ApiResponse::success(status)))
@@ -1601,10 +1607,7 @@ async fn get_basic_metrics(
     let last_finalized_height = api_state.consensus.get_last_finalized_height();
     let last_finalized_wave = api_state.consensus.get_last_finalized_wave();
     let tx_pool_size = api_state.consensus.tx_pool_size();
-    
-    // MVP: peer count not accessible from API state (network is separate)
-    // In future, we could add a channel or shared state to expose this
-    let connected_peers = 0;
+    let connected_peers = api_state.connected_peers.load(Ordering::Relaxed);
     
     // Calculate average block time from recent blocks (last 10 blocks)
     let block_time_avg_ms = if current_height > 0 {
@@ -1678,6 +1681,7 @@ mod tests {
             state,
             config,
             ws_tx,
+            connected_peers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
     
