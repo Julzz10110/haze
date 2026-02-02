@@ -262,13 +262,31 @@ impl ConsensusEngine {
                 // Signer is always `from` (the staker)
                 self.verify_transaction_signature(tx, from)?;
             }
+            Transaction::DeployContract { from, code, fee, signature, .. } => {
+                const MAX_CONTRACT_CODE_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
+                if code.len() > MAX_CONTRACT_CODE_SIZE {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        format!("Contract code size {} exceeds limit {}", code.len(), MAX_CONTRACT_CODE_SIZE)
+                    ));
+                }
+                if signature.is_empty() {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        "Transaction signature is empty".to_string()
+                    ));
+                }
+                self.verify_transaction_signature(tx, from)?;
+            }
             Transaction::ContractCall { from, gas_limit, signature, .. } => {
                 if *gas_limit == 0 {
                     return Err(crate::error::HazeError::InvalidTransaction(
                         "Gas limit cannot be zero".to_string()
                     ));
                 }
-
+                if *gas_limit > self.config.vm.gas_limit {
+                    return Err(crate::error::HazeError::InvalidTransaction(
+                        format!("Gas limit {} exceeds node limit {}", gas_limit, self.config.vm.gas_limit)
+                    ));
+                }
                 if signature.is_empty() {
                     return Err(crate::error::HazeError::InvalidTransaction(
                         "Transaction signature is empty".to_string()
@@ -302,6 +320,7 @@ impl ConsensusEngine {
         let current_height = self.state.current_height();
         let (chain_id, valid_until_height) = match tx {
             Transaction::Transfer { chain_id, valid_until_height, .. } => (chain_id.as_ref(), valid_until_height.as_ref()),
+            Transaction::DeployContract { chain_id, valid_until_height, .. } => (chain_id.as_ref(), valid_until_height.as_ref()),
             Transaction::ContractCall { chain_id, valid_until_height, .. } => (chain_id.as_ref(), valid_until_height.as_ref()),
             Transaction::MistbornAsset { chain_id, valid_until_height, .. } => (chain_id.as_ref(), valid_until_height.as_ref()),
             Transaction::Stake { chain_id, valid_until_height, .. } => (chain_id.as_ref(), valid_until_height.as_ref()),
@@ -337,6 +356,7 @@ impl ConsensusEngine {
         // Determine signer (always `from`) and signature
         let (signer_address, signature) = match tx {
             Transaction::Transfer { from, signature, .. } => (from, signature),
+            Transaction::DeployContract { from, signature, .. } => (from, signature),
             Transaction::ContractCall { from, signature, .. } => (from, signature),
             Transaction::MistbornAsset { from, signature, .. } => (from, signature),
             Transaction::Stake { from, signature, .. } => (from, signature),
@@ -547,6 +567,17 @@ impl ConsensusEngine {
                 data.extend_from_slice(from);
                 data.extend_from_slice(to);
                 data.extend_from_slice(&amount.to_le_bytes());
+                data.extend_from_slice(&fee.to_le_bytes());
+                data.extend_from_slice(&nonce.to_le_bytes());
+                Self::append_chain_fields(&mut data, *chain_id, *valid_until_height);
+                data
+            }
+            Transaction::DeployContract { from, code, fee, nonce, chain_id, valid_until_height, .. } => {
+                let mut data = Vec::new();
+                data.extend_from_slice(b"DeployContract");
+                data.extend_from_slice(from);
+                data.extend_from_slice(&(code.len() as u32).to_le_bytes());
+                data.extend_from_slice(code);
                 data.extend_from_slice(&fee.to_le_bytes());
                 data.extend_from_slice(&nonce.to_le_bytes());
                 Self::append_chain_fields(&mut data, *chain_id, *valid_until_height);

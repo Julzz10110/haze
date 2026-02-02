@@ -71,7 +71,9 @@ fn create_test_node(_id: u64) -> (Arc<StateManager>, Arc<ConsensusEngine>, KeyPa
     let db_id = MULTI_NODE_TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut config = Config::default();
     config.storage.db_path = PathBuf::from(format!("./haze_db_test_multi_node_{}", db_id));
-    
+    // Fresh db so replay_blocks_from_db() does not deserialize old incompatible block format
+    let _ = std::fs::remove_dir_all(&config.storage.db_path);
+
     let state = Arc::new(StateManager::new(&config).unwrap());
     let consensus = Arc::new(ConsensusEngine::new(config, state.clone()).unwrap());
     let keypair = KeyPair::generate();

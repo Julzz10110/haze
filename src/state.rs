@@ -10,6 +10,7 @@ const BLOCK_HEIGHT_PREFIX: &[u8] = b"block_h";
 use tokio::sync::broadcast;
 use crate::types::{Address, Hash, Block, Transaction, AssetAction, AssetPermission, PermissionLevel};
 use crate::config::Config;
+use crate::vm::{HazeVM, ExecutionContext};
 use crate::error::{HazeError, Result};
 use crate::tokenomics::Tokenomics;
 use crate::economy::FogEconomy;
@@ -36,6 +37,9 @@ pub struct StateManager {
     
     // Cache for frequently accessed assets (LRU-like with access counter)
     asset_access_count: Arc<DashMap<Hash, u64>>, // Track access frequency
+
+    /// Deployed WASM contract code by address (address = sha256(code) for DeployContract)
+    contracts: Arc<DashMap<Address, Vec<u8>>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -142,6 +146,7 @@ impl StateManager {
             asset_index_by_game_id: Arc::new(DashMap::new()),
             asset_index_by_density: Arc::new(DashMap::new()),
             asset_access_count: Arc::new(DashMap::new()),
+            contracts: Arc::new(DashMap::new()),
         };
         state.replay_blocks_from_db()?;
         Ok(state)
@@ -1617,14 +1622,86 @@ impl StateManager {
                     owner: hex::encode(owner),
                 });
             }
-            _ => {
-                // Contract calls handled by VM
+            Transaction::DeployContract { from, code, fee, nonce, .. } => {
+                let mut from_account = self.accounts
+                    .entry(*from)
+                    .or_insert_with(|| AccountState { balance: 0, nonce: 0, staked: 0 });
+                let expected_nonce = from_account.nonce;
+                if *nonce != expected_nonce {
+                    return Err(HazeError::InvalidTransaction(
+                        format!("Invalid nonce: expected {}, got {}", expected_nonce, nonce)
+                    ));
+                }
+                if from_account.balance < *fee {
+                    return Err(HazeError::InvalidTransaction("Insufficient balance for fee".to_string()));
+                }
+                from_account.balance -= fee;
+                from_account.nonce = *nonce + 1;
+                let contract_address = crate::types::sha256(code);
+                self.contracts.insert(contract_address, code.clone());
+                let _ = self.tokenomics.process_gas_fee(*fee)?;
+            }
+            Transaction::ContractCall { from, contract, method, args, gas_limit, fee, nonce, .. } => {
+                if *gas_limit > self.config.vm.gas_limit {
+                    return Err(HazeError::VM(format!(
+                        "Gas limit {} exceeds node limit {}",
+                        gas_limit, self.config.vm.gas_limit
+                    )));
+                }
+                let wasm_code = self.contracts.get(contract)
+                    .ok_or_else(|| HazeError::VM("Contract not found".to_string()))?
+                    .clone();
+                let mut from_account = self.accounts
+                    .entry(*from)
+                    .or_insert_with(|| AccountState { balance: 0, nonce: 0, staked: 0 });
+                let expected_nonce = from_account.nonce;
+                if *nonce != expected_nonce {
+                    return Err(HazeError::InvalidTransaction(
+                        format!("Invalid nonce: expected {}, got {}", expected_nonce, nonce)
+                    ));
+                }
+                let gas_fee_estimate = (*gas_limit).saturating_mul(self.config.vm.gas_price);
+                if from_account.balance < *fee + gas_fee_estimate {
+                    return Err(HazeError::InvalidTransaction(
+                        "Insufficient balance for fee and gas".to_string()
+                    ));
+                }
+                from_account.balance -= fee;
+                from_account.nonce = *nonce + 1;
+                let _ = self.tokenomics.process_gas_fee(*fee)?;
+
+                let vm = HazeVM::new((*self.config).clone())?;
+                let mut context = ExecutionContext {
+                    caller: *from,
+                    contract: *contract,
+                    gas_limit: *gas_limit,
+                    gas_used: 0,
+                };
+                let _result = vm.execute_contract(&wasm_code, method, args, &mut context)?;
+                let gas_used = context.gas_used;
+                let gas_fee = gas_used.saturating_mul(self.config.vm.gas_price);
+                let mut from_account = self.accounts
+                    .entry(*from)
+                    .or_insert_with(|| AccountState { balance: 0, nonce: 0, staked: 0 });
+                if from_account.balance < gas_fee {
+                    return Err(HazeError::InvalidTransaction(
+                        format!("Insufficient balance for gas: need {}, have {}", gas_fee, from_account.balance)
+                    ));
+                }
+                from_account.balance -= gas_fee;
+                let _ = self.tokenomics.process_gas_fee(gas_fee)?;
             }
         }
         
         Ok(())
     }
     
+    /// Register contract code at address (for tests or future deploy API).
+    /// Contract address is typically sha256(code); use this to preload code without a DeployContract tx.
+    pub fn register_contract(&self, address: Address, code: Vec<u8>) {
+        self.contracts.insert(address, code);
+    }
+
     /// Apply multiple transactions in batch (optimized)
     ///
     /// # Arguments
@@ -1768,6 +1845,7 @@ impl Clone for StateManager {
             asset_index_by_game_id: self.asset_index_by_game_id.clone(),
             asset_index_by_density: self.asset_index_by_density.clone(),
             asset_access_count: self.asset_access_count.clone(),
+            contracts: self.contracts.clone(),
         }
     }
 }

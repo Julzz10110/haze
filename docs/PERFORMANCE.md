@@ -70,7 +70,7 @@ For production use, operators should be aware of the following limits and gas se
 
 ### VM and transaction gas
 
-- **`vm.gas_limit`** — Maximum gas per transaction (default: 10_000_000). ContractCall and MistbornAsset operations consume gas; exceeding this limit causes the transaction to fail.
+- **`vm.gas_limit`** — Maximum gas per transaction (default: 10_000_000). ContractCall and MistbornAsset operations consume gas; exceeding this limit causes the transaction to fail. ContractCall’s `gas_limit` must not exceed this value (enforced in consensus).
 - **`vm.gas_price`** — Gas price in base units (default: 1). Fee for asset operations is `gas_cost * gas_price`; 50% of gas fees are burned (see tokenomics).
 - **`POST /api/v1/assets/estimate-gas`** — Use this endpoint to estimate gas cost and fee before submitting an asset transaction.
 

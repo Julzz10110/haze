@@ -76,13 +76,13 @@ impl HazeVM {
         })
     }
 
-    /// Execute contract call
+    /// Execute contract call. Updates context.gas_used with actual gas consumed.
     pub fn execute_contract(
         &self,
         wasm_code: &[u8],
         method: &str,
         args: &[u8],
-        mut context: ExecutionContext,
+        context: &mut ExecutionContext,
     ) -> Result<Vec<u8>> {
         // Check gas limit
         if context.gas_limit == 0 {
@@ -683,7 +683,7 @@ mod tests {
         // Create a minimal WASM module
         let wasm = vm.create_game_primitive(GamePrimitiveType::AssetMist).unwrap();
         
-        let context = ExecutionContext {
+        let mut context = ExecutionContext {
             caller: create_test_address(1),
             contract: create_test_address(2),
             gas_limit: 10000,
@@ -691,7 +691,7 @@ mod tests {
         };
         
         // Try to execute the contract
-        let result = vm.execute_contract(&wasm, "execute", &[], context);
+        let result = vm.execute_contract(&wasm, "execute", &[], &mut context);
         
         // The minimal WASM module should compile, but execution might fail
         // due to missing function or other runtime issues
@@ -725,14 +725,14 @@ mod tests {
         
         let wasm = vm.create_game_primitive(GamePrimitiveType::AssetMist).unwrap();
         
-        let context = ExecutionContext {
+        let mut context = ExecutionContext {
             caller: create_test_address(1),
             contract: create_test_address(2),
             gas_limit: 0,
             gas_used: 0,
         };
         
-        let result = vm.execute_contract(&wasm, "execute", &[], context);
+        let result = vm.execute_contract(&wasm, "execute", &[], &mut context);
         assert!(result.is_err());
         let error_msg = format!("{}", result.unwrap_err());
         assert!(error_msg.contains("Gas limit is zero"));
@@ -745,14 +745,14 @@ mod tests {
         
         let wasm = vm.create_game_primitive(GamePrimitiveType::AssetMist).unwrap();
         
-        let context = ExecutionContext {
+        let mut context = ExecutionContext {
             caller: create_test_address(1),
             contract: create_test_address(2),
             gas_limit: 100, // Too low
             gas_used: 0,
         };
         
-        let result = vm.execute_contract(&wasm, "execute", &[], context);
+        let result = vm.execute_contract(&wasm, "execute", &[], &mut context);
         // Should fail due to insufficient gas
         assert!(result.is_err());
     }

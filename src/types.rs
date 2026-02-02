@@ -96,6 +96,19 @@ pub enum Transaction {
         signature: Vec<u8>,
     },
 
+    /// Deploy WASM contract (code stored at address = sha256(code))
+    DeployContract {
+        from: Address,
+        code: Vec<u8>,
+        fee: u64,
+        nonce: u64,
+        #[serde(default)]
+        chain_id: Option<u64>,
+        #[serde(default)]
+        valid_until_height: Option<u64>,
+        signature: Vec<u8>,
+    },
+
     /// Execute smart contract
     ContractCall {
         from: Address,

@@ -217,6 +217,24 @@ fn parse_transaction_from_value(v: &serde_json::Value) -> Result<Transaction, St
                 signature,
             })
         }
+        "DeployContract" => {
+            let from = bytes32_from_value(inner.get("from").ok_or("missing from")?)?;
+            let code = bytes_from_value(inner.get("code").ok_or("missing code")?)?;
+            let fee = u64_from_value(inner.get("fee").ok_or("missing fee")?)?;
+            let nonce = u64_from_value(inner.get("nonce").ok_or("missing nonce")?)?;
+            let chain_id = inner.get("chain_id").and_then(|c| u64_from_value(c).ok());
+            let valid_until_height = inner.get("valid_until_height").and_then(|h| u64_from_value(h).ok());
+            let signature = bytes_from_value(inner.get("signature").ok_or("missing signature")?)?;
+            Ok(Transaction::DeployContract {
+                from,
+                code,
+                fee,
+                nonce,
+                chain_id,
+                valid_until_height,
+                signature,
+            })
+        }
         "ContractCall" => {
             let from = bytes32_from_value(inner.get("from").ok_or("missing from")?)?;
             let contract = bytes32_from_value(inner.get("contract").ok_or("missing contract")?)?;

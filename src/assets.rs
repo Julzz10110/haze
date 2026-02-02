@@ -482,14 +482,14 @@ impl MistbornAsset {
         wasm_code: &[u8],
         new_data: HashMap<String, String>,
         blob_storage: Option<&BlobStorage>,
-        context: ExecutionContext,
+        mut context: ExecutionContext,
     ) -> Result<()> {
         // Serialize new_data for WASM call
         let args = bincode::serialize(&new_data)
             .map_err(|e| HazeError::Asset(format!("Failed to serialize data: {}", e)))?;
         
         // Execute WASM contract
-        let result = vm.execute_contract(wasm_code, "condense", &args, context)?;
+        let result = vm.execute_contract(wasm_code, "condense", &args, &mut context)?;
         
         // Deserialize result
         let success: bool = bincode::deserialize(&result)
@@ -509,14 +509,14 @@ impl MistbornAsset {
         vm: &HazeVM,
         wasm_code: &[u8],
         blob_storage: Option<&BlobStorage>,
-        context: ExecutionContext,
+        mut context: ExecutionContext,
     ) -> Result<()> {
         // Serialize asset_id for WASM call
         let args = bincode::serialize(&self.asset_id)
             .map_err(|e| HazeError::Asset(format!("Failed to serialize asset_id: {}", e)))?;
         
         // Execute WASM contract
-        let result = vm.execute_contract(wasm_code, "evaporate", &args, context)?;
+        let result = vm.execute_contract(wasm_code, "evaporate", &args, &mut context)?;
         
         // Deserialize result
         let success: bool = bincode::deserialize(&result)
