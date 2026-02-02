@@ -1880,6 +1880,8 @@ mod tests {
     #[test]
     fn test_finalized_block_not_reverted() {
         let config = create_test_config("finalized_no_revert");
+        // Fresh db so replay_blocks_from_db() doesn't load blocks from a previous run
+        let _ = std::fs::remove_dir_all(&config.storage.db_path);
         let state = crate::state::StateManager::new(&config).unwrap();
         let consensus = ConsensusEngine::new(config, std::sync::Arc::new(state)).unwrap();
         let validator = KeyPair::generate().address();

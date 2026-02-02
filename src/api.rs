@@ -20,6 +20,7 @@ use axum::{
 use axum::extract::ws::Message;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use crate::assets::BlobStorage;
 use crate::config::Config;
 use crate::consensus::ConsensusEngine;
 use crate::state::StateManager;
@@ -352,6 +353,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/api/v1/accounts/:address", get(get_account))
         .route("/api/v1/accounts/:address/balance", get(get_balance))
         .route("/api/v1/assets/:asset_id", get(get_asset))
+        .route("/api/v1/assets/:asset_id/blob/:blob_key", get(get_asset_blob))
         .route("/api/v1/assets/:asset_id/history", get(get_asset_history))
         .route("/api/v1/assets/:asset_id/versions", get(get_asset_versions))
         .route("/api/v1/assets/:asset_id/versions/:version", get(get_asset_version))
@@ -606,6 +608,22 @@ async fn get_asset(
     } else {
         Err(StatusCode::NOT_FOUND)
     }
+}
+
+/// Get blob data for an asset by blob key (Core density). Returns raw bytes.
+async fn get_asset_blob(
+    State(api_state): State<ApiState>,
+    Path((asset_id_str, blob_key)): Path<(String, String)>,
+) -> ApiResult<impl axum::response::IntoResponse> {
+    let asset_id = crate::types::hex_to_hash(&asset_id_str).ok_or(StatusCode::BAD_REQUEST)?;
+    let asset_state = api_state.state.get_asset(&asset_id).ok_or(StatusCode::NOT_FOUND)?;
+    let blob_hash = asset_state.blob_refs.get(&blob_key).ok_or(StatusCode::NOT_FOUND)?;
+    let blob_storage = BlobStorage::new(&api_state.config).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let data = blob_storage.get_blob(&blob_key, blob_hash).map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        data,
+    ))
 }
 
 /// Get asset history query parameters

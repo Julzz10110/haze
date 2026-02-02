@@ -64,6 +64,35 @@ If observed propagation or finalization time exceeds targets:
 3. **Block creation interval**
    - Current MVP uses a fixed 5 s interval in `main.rs`. Tuning block production rate may affect both propagation and finalization metrics.
 
+## Gas and limits (production)
+
+For production use, operators should be aware of the following limits and gas settings.
+
+### VM and transaction gas
+
+- **`vm.gas_limit`** — Maximum gas per transaction (default: 10_000_000). ContractCall and MistbornAsset operations consume gas; exceeding this limit causes the transaction to fail.
+- **`vm.gas_price`** — Gas price in base units (default: 1). Fee for asset operations is `gas_cost * gas_price`; 50% of gas fees are burned (see tokenomics).
+- **`POST /api/v1/assets/estimate-gas`** — Use this endpoint to estimate gas cost and fee before submitting an asset transaction.
+
+### Asset gas (AssetGasConfig)
+
+Gas costs for Mistborn operations are configured in `config.asset_gas`: create (base + per KB metadata), update, condense (base + density multiplier + per KB), evaporate, merge (base + per KB combined size), split (base + per component + per KB). See `haze_config.json` after first run for full structure.
+
+### Asset limits (AssetLimits, NodeQuotas)
+
+- **Per account:** `max_assets_per_account` (by node type: core/edge/light/mobile).
+- **Per asset:** `max_metadata_size` (bytes), `max_blob_files_per_asset`.
+- **Per account blob storage:** `max_blob_storage_per_account` (bytes, estimated from blob count).
+
+Limits are enforced in state before create/update/condense; exceeding them returns `InvalidTransaction` or `AssetSizeExceeded`. Node type is taken from `config.network.node_type` and selects the quota (e.g. `asset_limits.quotas.light`).
+
+### Recommendations
+
+- Set `vm.gas_limit` and `vm.gas_price` according to desired fee level and DoS resistance.
+- Tune `asset_limits.quotas` per node role (core nodes can allow higher limits than light/mobile).
+- Use `estimate-gas` in clients to show users expected fees before signing.
+
 ## References
 
 - [OBSERVABILITY.md](OBSERVABILITY.md) — Metrics endpoint and logging
+- [MISTBORN_GUIDE.md](MISTBORN_GUIDE.md) — Asset operations and API

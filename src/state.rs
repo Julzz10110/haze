@@ -4,6 +4,9 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use parking_lot::RwLock;
 use sled::Db;
+
+/// Sled key prefix for persisted blocks (block height index). Key = PREFIX + height.to_be_bytes().
+const BLOCK_HEIGHT_PREFIX: &[u8] = b"block_h";
 use tokio::sync::broadcast;
 use crate::types::{Address, Hash, Block, Transaction, AssetAction, AssetPermission, PermissionLevel};
 use crate::config::Config;
@@ -125,7 +128,7 @@ impl StateManager {
         let db = sled::open(&config.storage.db_path)
             .map_err(|e| HazeError::Database(format!("Failed to open database: {}", e)))?;
 
-        Ok(Self {
+        let state = Self {
             db: Arc::new(db),
             config: Arc::new(config.clone()),
             accounts: Arc::new(DashMap::new()),
@@ -139,7 +142,31 @@ impl StateManager {
             asset_index_by_game_id: Arc::new(DashMap::new()),
             asset_index_by_density: Arc::new(DashMap::new()),
             asset_access_count: Arc::new(DashMap::new()),
-        })
+        };
+        state.replay_blocks_from_db()?;
+        Ok(state)
+    }
+
+    /// Replay blocks persisted in sled to restore state after restart (blob_refs, history, etc.).
+    fn replay_blocks_from_db(&self) -> Result<()> {
+        let mut entries: Vec<(u64, Block)> = Vec::new();
+        for item in self.db.scan_prefix(BLOCK_HEIGHT_PREFIX) {
+            let (key, value) = item.map_err(|e| HazeError::Database(e.to_string()))?;
+            if key.len() != BLOCK_HEIGHT_PREFIX.len() + 8 {
+                continue;
+            }
+            let height_bytes: [u8; 8] = key[BLOCK_HEIGHT_PREFIX.len()..]
+                .try_into()
+                .map_err(|_| HazeError::Database("Invalid block key length".to_string()))?;
+            let height = u64::from_be_bytes(height_bytes);
+            let block: Block = bincode::deserialize(&value).map_err(|e| HazeError::Serialization(e.to_string()))?;
+            entries.push((height, block));
+        }
+        entries.sort_by_key(|(h, _)| *h);
+        for (_, block) in entries {
+            self.apply_block(&block)?;
+        }
+        Ok(())
     }
 
     /// Set WebSocket broadcaster for real-time event notifications
@@ -731,12 +758,22 @@ impl StateManager {
             self.apply_transaction(tx)?;
         }
 
-        // Store block
+        // Store block in memory and persist to sled for recovery on restart
         let block_hash = block.header.hash;
         self.blocks.insert(block_hash, block.clone());
-        
+        let height = block.header.height;
+        let key: Vec<u8> = BLOCK_HEIGHT_PREFIX
+            .iter()
+            .chain(height.to_be_bytes().iter())
+            .copied()
+            .collect();
+        let serialized = bincode::serialize(block).map_err(|e| HazeError::Serialization(e.to_string()))?;
+        self.db
+            .insert(key, serialized)
+            .map_err(|e| HazeError::Database(e.to_string()))?;
+
         // Update height
-        *self.current_height.write() = block.header.height;
+        *self.current_height.write() = height;
 
         Ok(())
     }
@@ -784,7 +821,7 @@ impl StateManager {
                 // Process gas fee (burn 50%)
                 let _remaining_fee = self.tokenomics.process_gas_fee(*fee)?;
             }
-            Transaction::MistbornAsset { from: owner, action, asset_id, data, .. } => {
+            Transaction::MistbornAsset { from: _owner, action, asset_id, data, .. } => {
                 // Calculate gas cost for this operation
                 let gas_cost = crate::assets::calculate_asset_operation_gas(
                     &self.config,
