@@ -6,23 +6,44 @@
  * - Multiple concurrent senders
  * - Statistics collection (success rate, latency)
  * - Can target multiple nodes (round-robin)
+ * - Modes: transfer (default), asset (MistbornAsset Create), mixed (transfer + asset)
  *
  * Usage:
- *   HAZE_LOAD_NODE_URLS="http://127.0.0.1:8080,http://127.0.0.1:8081" \
- *   HAZE_LOAD_TX_COUNT=1000 \
- *   HAZE_LOAD_TX_PER_SEC=50 \
- *   HAZE_LOAD_CONCURRENT=5 \
- *   node dist/examples/load-test.js
+ *   # Transfer only (default)
+ *   HAZE_LOAD_NODE_URLS="http://127.0.0.1:8080" HAZE_LOAD_TX_COUNT=100 \
+ *     node dist/examples/load-test.js
+ *
+ *   # Asset creation load (sender account must have balance — use faucet or pre-fund)
+ *   HAZE_LOAD_MODE=asset HAZE_LOAD_TX_COUNT=200 HAZE_LOAD_NODE_URLS="http://127.0.0.1:8080" \
+ *     node dist/examples/load-test.js
+ *
+ *   # Mixed: 50% transfer, 50% asset (HAZE_LOAD_MIX_RATIO=50 is default)
+ *   HAZE_LOAD_MODE=mixed HAZE_LOAD_TX_COUNT=100 HAZE_LOAD_MIX_RATIO=50 \
+ *     node dist/examples/load-test.js
+ *
+ * Env vars: HAZE_LOAD_NODE_URLS, HAZE_LOAD_TX_COUNT, HAZE_LOAD_TX_PER_SEC,
+ *   HAZE_LOAD_CONCURRENT, HAZE_LOAD_MODE (transfer|asset|mixed), HAZE_LOAD_MIX_RATIO (0-100, default 50).
  */
 
 import { HazeClient } from '../src/client';
-import { KeyPair, TransactionBuilder, DEFAULT_API_URL } from '../src/index';
+import {
+  KeyPair,
+  TransactionBuilder,
+  MistbornAsset,
+  DEFAULT_API_URL,
+  DensityLevel,
+} from '../src/index';
+import type { Transaction } from '../src/types';
+
+export type LoadMode = 'transfer' | 'asset' | 'mixed';
 
 interface LoadTestConfig {
   nodeUrls: string[];
   txCount: number;
   txPerSec: number;
   concurrent: number;
+  mode: LoadMode;
+  mixRatio: number; // 0–100, percent of transfers in mixed mode
 }
 
 interface Stats {
@@ -43,12 +64,18 @@ function parseConfig(): LoadTestConfig {
   const txCount = Number(process.env.HAZE_LOAD_TX_COUNT ?? '100');
   const txPerSec = Number(process.env.HAZE_LOAD_TX_PER_SEC ?? '10');
   const concurrent = Number(process.env.HAZE_LOAD_CONCURRENT ?? '1');
+  const modeRaw = (process.env.HAZE_LOAD_MODE ?? 'transfer').toLowerCase();
+  const mode: LoadMode =
+    modeRaw === 'asset' ? 'asset' : modeRaw === 'mixed' ? 'mixed' : 'transfer';
+  const mixRatio = Math.max(0, Math.min(100, Number(process.env.HAZE_LOAD_MIX_RATIO ?? '50')));
 
   return {
     nodeUrls,
     txCount: Math.max(1, txCount),
     txPerSec: Math.max(1, txPerSec),
     concurrent: Math.max(1, Math.min(concurrent, 50)), // Cap at 50 concurrent
+    mode,
+    mixRatio,
   };
 }
 
@@ -104,13 +131,124 @@ async function sendTransactionBatch(
   }
 }
 
+async function sendAssetBatch(
+  clients: HazeClient[],
+  owner: KeyPair,
+  startIndex: number,
+  count: number,
+  delayMs: number,
+  stats: Stats,
+): Promise<void> {
+  const ownerAddr = owner.getAddress();
+
+  for (let i = 0; i < count; i++) {
+    const globalIndex = startIndex + i;
+    const client = clients[globalIndex % clients.length];
+
+    try {
+      const assetId = MistbornAsset.createAssetId(`load-asset-${globalIndex}-${Date.now()}`);
+      const tx = MistbornAsset.createCreateTransaction(
+        assetId,
+        ownerAddr,
+        DensityLevel.Ethereal,
+        { index: String(globalIndex) },
+        [],
+        undefined,
+      );
+      const signed = await TransactionBuilder.sign(tx, owner);
+      const start = Date.now();
+      await client.sendTransaction(signed);
+      const latency = Date.now() - start;
+
+      stats.success++;
+      stats.latencies.push(latency);
+    } catch (err: any) {
+      stats.failed++;
+      if (stats.failed <= 5) {
+        console.warn(`Asset tx #${globalIndex} failed:`, err?.message ?? err);
+      }
+    }
+
+    stats.sent++;
+    if (delayMs > 0 && i < count - 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
+async function sendMixedBatch(
+  clients: HazeClient[],
+  sender: KeyPair,
+  recipient: KeyPair,
+  startIndex: number,
+  count: number,
+  delayMs: number,
+  mixRatio: number,
+  stats: Stats,
+): Promise<void> {
+  const senderAddr = sender.getAddress();
+  const recipientAddr = recipient.getAddress();
+
+  for (let i = 0; i < count; i++) {
+    const globalIndex = startIndex + i;
+    const client = clients[globalIndex % clients.length];
+    const isTransfer = (globalIndex % 100) < mixRatio;
+
+    try {
+      let signed: Transaction;
+      if (isTransfer) {
+        const tx = TransactionBuilder.createTransfer(
+          senderAddr,
+          recipientAddr,
+          BigInt(1),
+          BigInt(1),
+          globalIndex,
+        );
+        signed = await TransactionBuilder.sign(tx, sender);
+      } else {
+        const assetId = MistbornAsset.createAssetId(`load-mixed-${globalIndex}-${Date.now()}`);
+        const tx = MistbornAsset.createCreateTransaction(
+          assetId,
+          senderAddr,
+          DensityLevel.Ethereal,
+          { index: String(globalIndex) },
+          [],
+          undefined,
+        );
+        signed = await TransactionBuilder.sign(tx, sender);
+      }
+
+      const start = Date.now();
+      await client.sendTransaction(signed);
+      const latency = Date.now() - start;
+
+      stats.success++;
+      stats.latencies.push(latency);
+    } catch (err: any) {
+      stats.failed++;
+      if (stats.failed <= 5) {
+        console.warn(`Tx #${globalIndex} (${isTransfer ? 'transfer' : 'asset'}) failed:`, err?.message ?? err);
+      }
+    }
+
+    stats.sent++;
+    if (delayMs > 0 && i < count - 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 async function runLoadTest(config: LoadTestConfig): Promise<void> {
   console.log('HAZE Load Test');
   console.log('==============');
   console.log(`Nodes: ${config.nodeUrls.join(', ')}`);
+  console.log(`Mode: ${config.mode}${config.mode === 'mixed' ? ` (${config.mixRatio}% transfer)` : ''}`);
   console.log(`Total transactions: ${config.txCount}`);
   console.log(`Target rate: ${config.txPerSec} tx/sec`);
   console.log(`Concurrent senders: ${config.concurrent}`);
+  if (config.mode !== 'transfer') {
+    console.log('Note: For asset/mixed modes the sender account must have balance (faucet or pre-fund).');
+  }
   console.log();
 
   const clients = createClients(config.nodeUrls);
@@ -122,11 +260,9 @@ async function runLoadTest(config: LoadTestConfig): Promise<void> {
     startTime: Date.now(),
   };
 
-  // Generate keypairs
   const sender = await KeyPair.generate();
   const recipient = await KeyPair.generate();
 
-  // Calculate delay between transactions to achieve target rate
   const delayMs = config.txPerSec > 0 ? 1000 / config.txPerSec : 0;
   const txPerSender = Math.ceil(config.txCount / config.concurrent);
 
@@ -134,19 +270,34 @@ async function runLoadTest(config: LoadTestConfig): Promise<void> {
   console.log(`Delay between tx: ${delayMs.toFixed(2)}ms`);
   console.log();
 
-  // Start concurrent senders
   const promises: Promise<void>[] = [];
   for (let i = 0; i < config.concurrent; i++) {
     const startNonce = i * txPerSender;
     const count = Math.min(txPerSender, config.txCount - startNonce);
     if (count > 0) {
-      promises.push(
-        sendTransactionBatch(clients, sender, recipient, startNonce, count, delayMs, stats),
-      );
+      if (config.mode === 'transfer') {
+        promises.push(
+          sendTransactionBatch(clients, sender, recipient, startNonce, count, delayMs, stats),
+        );
+      } else if (config.mode === 'asset') {
+        promises.push(sendAssetBatch(clients, sender, startNonce, count, delayMs, stats));
+      } else {
+        promises.push(
+          sendMixedBatch(
+            clients,
+            sender,
+            recipient,
+            startNonce,
+            count,
+            delayMs,
+            config.mixRatio,
+            stats,
+          ),
+        );
+      }
     }
   }
 
-  // Wait for all senders to complete
   await Promise.all(promises);
 
   stats.endTime = Date.now();

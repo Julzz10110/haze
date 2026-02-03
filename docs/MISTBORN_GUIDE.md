@@ -73,3 +73,4 @@ await client.sendTransaction(signed);
 - [API_TRANSACTIONS.md](API_TRANSACTIONS.md) — API contract and transaction formats
 - [OpenAPI](openapi.yaml) — REST API description
 - [MISTBORN_NFT_PLAN.md](MISTBORN_NFT_PLAN.md) — Mistborn development plan
+- [PERFORMANCE.md](PERFORMANCE.md) — Gas and limits, load tests, tuning; recommended limits and operator knobs for production

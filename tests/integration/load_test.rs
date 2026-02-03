@@ -68,6 +68,26 @@ fn sign_mistborn_asset_tx(
     keypair.sign(&serialized)
 }
 
+/// Sign Transfer transaction (must mirror consensus::get_transaction_data_for_signing)
+fn sign_transfer_tx(
+    keypair: &KeyPair,
+    from: &haze::types::Address,
+    to: &haze::types::Address,
+    amount: u64,
+    fee: u64,
+    nonce: u64,
+) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(b"Transfer");
+    data.extend_from_slice(from);
+    data.extend_from_slice(to);
+    data.extend_from_slice(&amount.to_le_bytes());
+    data.extend_from_slice(&fee.to_le_bytes());
+    data.extend_from_slice(&nonce.to_le_bytes());
+    // chain_id, valid_until_height = None — nothing appended
+    keypair.sign(&data)
+}
+
 fn create_test_node() -> (Arc<StateManager>, Arc<ConsensusEngine>, KeyPair) {
     let db_id = LOAD_TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut config = Config::default();
@@ -254,4 +274,186 @@ async fn test_load_search_performance() {
     
     println!("Search by owner: {} assets in {:?}", by_owner.len(), elapsed_owner);
     println!("Search by game_id: {} assets in {:?}", by_game.len(), elapsed_game);
+}
+
+#[tokio::test]
+async fn test_load_many_transfers() {
+    let (state, consensus, keypair) = create_test_node();
+    let sender = keypair.address();
+    let recipient = KeyPair::generate().address();
+    state.create_test_account(sender, 10_000_000, 0);
+    state.create_test_account(recipient, 0, 0);
+
+    const TRANSFER_COUNT: usize = 100;
+    const AMOUNT_PER_TX: u64 = 1;
+    const FEE_PER_TX: u64 = 1;
+    let start = Instant::now();
+
+    // Add and process one tx per block so nonce order is preserved (pool iteration order is undefined)
+    let mut blocks_created = 0;
+    for nonce in 0..TRANSFER_COUNT as u64 {
+        let signature = sign_transfer_tx(&keypair, &sender, &recipient, AMOUNT_PER_TX, FEE_PER_TX, nonce);
+        let tx = Transaction::Transfer {
+            from: sender,
+            to: recipient,
+            amount: AMOUNT_PER_TX,
+            fee: FEE_PER_TX,
+            nonce,
+            chain_id: None,
+            valid_until_height: None,
+            signature,
+        };
+        consensus.add_transaction(tx).unwrap();
+        let block = consensus.create_block(sender).unwrap();
+        consensus.process_block(&block).unwrap();
+        blocks_created += 1;
+    }
+
+    let elapsed = start.elapsed();
+    let recipient_balance = state.get_account(&recipient).unwrap().balance;
+    assert_eq!(recipient_balance, TRANSFER_COUNT as u64 * AMOUNT_PER_TX);
+    assert_eq!(state.current_height(), blocks_created);
+
+    let tps = TRANSFER_COUNT as f64 / elapsed.as_secs_f64();
+    println!(
+        "Processed {} transfers in {} blocks, took {:?}; TPS: {:.2}",
+        TRANSFER_COUNT, blocks_created, elapsed, tps
+    );
+}
+
+#[tokio::test]
+async fn test_load_mixed_transfers_and_assets() {
+    let (state, consensus, keypair) = create_test_node();
+    let owner = keypair.address();
+    let recipient = KeyPair::generate().address();
+    state.create_test_account(owner, 10_000_000, 0);
+    state.create_test_account(recipient, 0, 0);
+
+    const TRANSFER_COUNT: usize = 40;
+    const ASSET_COUNT: usize = 40;
+    const TOTAL: usize = TRANSFER_COUNT + ASSET_COUNT;
+    const AMOUNT_PER_TX: u64 = 1;
+    const FEE_PER_TX: u64 = 1;
+    let start = Instant::now();
+
+    // Add and process one block per "round" (one transfer + one asset) so transfer nonce order is preserved
+    let mut blocks_created = 0;
+    for i in 0..TRANSFER_COUNT.max(ASSET_COUNT) {
+        if i < TRANSFER_COUNT {
+            let nonce = i as u64;
+            let signature = sign_transfer_tx(&keypair, &owner, &recipient, AMOUNT_PER_TX, FEE_PER_TX, nonce);
+            let tx = Transaction::Transfer {
+                from: owner,
+                to: recipient,
+                amount: AMOUNT_PER_TX,
+                fee: FEE_PER_TX,
+                nonce,
+                chain_id: None,
+                valid_until_height: None,
+                signature,
+            };
+            consensus.add_transaction(tx).unwrap();
+        }
+        if i < ASSET_COUNT {
+            let asset_id = haze::types::sha256(&format!("mixed_asset_{}", i).as_bytes());
+            let data = AssetData {
+                density: DensityLevel::Ethereal,
+                metadata: std::collections::HashMap::new(),
+                attributes: vec![],
+                game_id: None,
+                owner,
+            };
+            let signature = sign_mistborn_asset_tx(&keypair, &AssetAction::Create, &asset_id, &data);
+            let tx = Transaction::MistbornAsset {
+                from: owner,
+                action: AssetAction::Create,
+                asset_id,
+                data,
+                fee: 0,
+                nonce: 0,
+                chain_id: None,
+                valid_until_height: None,
+                signature,
+            };
+            consensus.add_transaction(tx).unwrap();
+        }
+        let block = consensus.create_block(owner).unwrap();
+        consensus.process_block(&block).unwrap();
+        blocks_created += 1;
+    }
+
+    let elapsed = start.elapsed();
+
+    let recipient_balance = state.get_account(&recipient).unwrap().balance;
+    assert_eq!(recipient_balance, TRANSFER_COUNT as u64 * AMOUNT_PER_TX);
+
+    let owner_assets = state.search_assets_by_owner(&owner);
+    assert_eq!(owner_assets.len(), ASSET_COUNT);
+
+    let quota = state.get_quota_usage(&owner);
+    assert_eq!(quota.assets_count, ASSET_COUNT as u64);
+    assert_eq!(state.current_height(), blocks_created);
+
+    let tps = TOTAL as f64 / elapsed.as_secs_f64();
+    println!(
+        "Mixed: {} transfers + {} assets ({} tx) in {} blocks, took {:?}; TPS: {:.2}",
+        TRANSFER_COUNT, ASSET_COUNT, TOTAL, blocks_created, elapsed, tps
+    );
+}
+
+#[tokio::test]
+async fn test_stress_many_assets_per_account() {
+    let (state, consensus, keypair) = create_test_node();
+    let owner = keypair.address();
+    state.create_test_account(owner, 10_000_000, 0);
+
+    const ASSET_COUNT: usize = 500;
+    let start = Instant::now();
+
+    for i in 0..ASSET_COUNT {
+        let asset_id = haze::types::sha256(&format!("stress_asset_{}", i).as_bytes());
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("index".to_string(), i.to_string());
+        let data = AssetData {
+            density: DensityLevel::Ethereal,
+            metadata: meta,
+            attributes: vec![],
+            game_id: None,
+            owner,
+        };
+        let signature = sign_mistborn_asset_tx(&keypair, &AssetAction::Create, &asset_id, &data);
+        let tx = Transaction::MistbornAsset {
+            from: owner,
+            action: AssetAction::Create,
+            asset_id,
+            data,
+            fee: 0,
+            nonce: 0,
+            chain_id: None,
+            valid_until_height: None,
+            signature,
+        };
+        consensus.add_transaction(tx).unwrap();
+    }
+
+    let mut blocks_created = 0;
+    while consensus.tx_pool_size() > 0 {
+        let block = consensus.create_block(owner).unwrap();
+        consensus.process_block(&block).unwrap();
+        blocks_created += 1;
+    }
+
+    let elapsed = start.elapsed();
+    let owner_assets = state.search_assets_by_owner(&owner);
+    assert_eq!(owner_assets.len(), ASSET_COUNT);
+    let quota = state.get_quota_usage(&owner);
+    assert_eq!(quota.assets_count, ASSET_COUNT as u64);
+
+    println!(
+        "Stress: {} assets in {} blocks, took {:?}; assets/sec: {:.2}",
+        ASSET_COUNT,
+        blocks_created,
+        elapsed,
+        ASSET_COUNT as f64 / elapsed.as_secs_f64()
+    );
 }
