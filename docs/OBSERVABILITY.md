@@ -145,55 +145,63 @@ grep -i "error\|failed\|warn" node*.log
 grep -i "sync\|peer" node*.log
 ```
 
-## Prometheus Integration (Future)
+## Prometheus
 
-For production monitoring, you can integrate with Prometheus:
+The node exposes metrics in [Prometheus text exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/).
 
-1. **Add Prometheus metrics endpoint** (future enhancement):
-   ```
-   GET /api/v1/metrics/prometheus
-   ```
+### Endpoint
 
-2. **Scrape configuration** (`prometheus.yml`):
-   ```yaml
-   scrape_configs:
-     - job_name: 'haze'
-       static_configs:
-         - targets: ['127.0.0.1:8080']
-       metrics_path: '/api/v1/metrics/prometheus'
-   ```
+```bash
+curl http://127.0.0.1:8080/api/v1/metrics/prometheus
+```
 
-3. **Key metrics to track:**
-   - `haze_blockchain_height`
-   - `haze_finalized_height`
-   - `haze_tx_pool_size`
-   - `haze_connected_peers`
-   - `haze_block_time_seconds`
-   - `haze_transactions_per_second`
+**Response:** `Content-Type: text/plain; version=0.0.4; charset=utf-8`
 
-## Grafana Dashboards (Future)
+### Metrics
 
-Example dashboard queries:
+| Metric | Type | Description |
+|--------|------|-------------|
+| `haze_blockchain_height` | gauge | Current blockchain height |
+| `haze_finalized_height` | gauge | Last finalized block height |
+| `haze_finalized_wave` | gauge | Last finalized wave number |
+| `haze_tx_pool_size` | gauge | Number of transactions in the pool |
+| `haze_connected_peers` | gauge | Number of connected P2P peers |
+| `haze_block_time_seconds` | gauge | Average block time in seconds (last 10 blocks); 0 if not available |
 
-- **Blockchain Height Over Time:**
-  ```
-  haze_blockchain_height
-  ```
+### Scrape configuration
 
-- **Transaction Pool Size:**
-  ```
-  haze_tx_pool_size
-  ```
+Example `prometheus.yml`:
 
-- **Block Time:**
-  ```
-  rate(haze_block_time_seconds[5m])
-  ```
+```yaml
+scrape_configs:
+  - job_name: 'haze'
+    static_configs:
+      - targets: ['127.0.0.1:8080']
+    metrics_path: '/api/v1/metrics/prometheus'
+    scrape_interval: 15s
+```
 
-- **Transactions Per Second:**
-  ```
-  rate(haze_transactions_per_second[1m])
-  ```
+For multiple nodes, add one target per node or use a discovery mechanism.
+
+## Grafana
+
+Example panel queries (Prometheus data source):
+
+- **Blockchain height:** `haze_blockchain_height`
+- **Finalized height:** `haze_finalized_height`
+- **Transaction pool size:** `haze_tx_pool_size`
+- **Connected peers:** `haze_connected_peers`
+- **Average block time (s):** `haze_block_time_seconds`
+- **Height growth (rate):** `deriv(haze_blockchain_height[5m])` or `increase(haze_blockchain_height[1m])`
+
+## Alerts
+
+Suggested Prometheus/Alertmanager rules:
+
+- **Height not increasing:** `increase(haze_blockchain_height[5m]) == 0` and `haze_blockchain_height > 0`
+- **Finalization stuck:** `increase(haze_finalized_height[10m]) == 0` and `haze_finalized_height > 0`
+- **High tx pool:** `haze_tx_pool_size > 5000` (adjust threshold)
+- **No peers:** `haze_connected_peers == 0` (for nodes that should have peers)
 
 ## Health Checks
 

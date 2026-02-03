@@ -364,6 +364,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/health", get(health_check))
         .route("/api/v1/blockchain/info", get(get_blockchain_info))
         .route("/api/v1/metrics/basic", get(get_basic_metrics))
+        .route("/api/v1/metrics/prometheus", get(get_prometheus_metrics))
         .route("/api/v1/transactions", post(send_transaction))
         .route("/api/v1/transactions/:hash", get(get_transaction))
         .route("/api/v1/blocks/:hash", get(get_block_by_hash))
@@ -1679,6 +1680,73 @@ async fn get_basic_metrics(
     };
     
     Ok(Json(ApiResponse::success(metrics)))
+}
+
+/// Prometheus text exposition format (https://prometheus.io/docs/instrumenting/exposition_formats/)
+const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+/// Get metrics in Prometheus exposition format for scraping
+async fn get_prometheus_metrics(
+    State(api_state): State<ApiState>,
+) -> ApiResult<impl axum::response::IntoResponse> {
+    let current_height = api_state.state.current_height();
+    let last_finalized_height = api_state.consensus.get_last_finalized_height();
+    let last_finalized_wave = api_state.consensus.get_last_finalized_wave();
+    let tx_pool_size = api_state.consensus.tx_pool_size();
+    let connected_peers = api_state.connected_peers.load(Ordering::Relaxed);
+
+    let block_time_avg_sec: Option<f64> = if current_height > 0 {
+        let mut timestamps = Vec::new();
+        let start_height = current_height.saturating_sub(10);
+        for h in start_height..=current_height {
+            if let Some(block) = api_state.state.get_block_by_height(h) {
+                timestamps.push(block.header.timestamp);
+            }
+        }
+        if timestamps.len() >= 2 {
+            let total_time = timestamps.last().unwrap() - timestamps.first().unwrap();
+            let block_count = timestamps.len() - 1;
+            if block_count > 0 {
+                Some((total_time as f64) / (block_count as f64))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut out = String::new();
+    out.push_str("# HELP haze_blockchain_height Current blockchain height\n");
+    out.push_str("# TYPE haze_blockchain_height gauge\n");
+    out.push_str(&format!("haze_blockchain_height {}\n", current_height));
+    out.push_str("# HELP haze_finalized_height Last finalized block height\n");
+    out.push_str("# TYPE haze_finalized_height gauge\n");
+    out.push_str(&format!("haze_finalized_height {}\n", last_finalized_height));
+    out.push_str("# HELP haze_finalized_wave Last finalized wave number\n");
+    out.push_str("# TYPE haze_finalized_wave gauge\n");
+    out.push_str(&format!("haze_finalized_wave {}\n", last_finalized_wave));
+    out.push_str("# HELP haze_tx_pool_size Number of transactions in the pool\n");
+    out.push_str("# TYPE haze_tx_pool_size gauge\n");
+    out.push_str(&format!("haze_tx_pool_size {}\n", tx_pool_size));
+    out.push_str("# HELP haze_connected_peers Number of connected P2P peers\n");
+    out.push_str("# TYPE haze_connected_peers gauge\n");
+    out.push_str(&format!("haze_connected_peers {}\n", connected_peers));
+    out.push_str("# HELP haze_block_time_seconds Average block time in seconds (last 10 blocks)\n");
+    out.push_str("# TYPE haze_block_time_seconds gauge\n");
+    match block_time_avg_sec {
+        Some(sec) => out.push_str(&format!("haze_block_time_seconds {}\n", sec)),
+        None => out.push_str("haze_block_time_seconds 0\n"),
+    }
+
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE),
+        ],
+        out,
+    ))
 }
 
 /// Start API server
