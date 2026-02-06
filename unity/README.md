@@ -149,6 +149,42 @@ foreach (var asset in myAssets)
 }
 ```
 
+### 7. Using Mistborn High-Level API
+
+For easier Mistborn operations, use the `MistbornAsset` helper class:
+
+```csharp
+using Haze.Mistborn;
+
+var mistborn = new MistbornAsset(client, keyPair);
+
+// Create asset
+var assetId = MistbornAsset.CreateAssetId("my-seed");
+var response = await mistborn.CreateAsync(
+    assetId: assetId,
+    density: DensityLevel.Ethereal,
+    metadata: new Dictionary<string, string> { ["name"] = "My NFT" },
+    gameId: "my-game"
+);
+
+// Search my assets
+var myAssets = await mistborn.SearchByOwnerAsync();
+
+// Update asset
+await mistborn.UpdateAsync(assetId, new Dictionary<string, string> { ["level"] = "10" });
+
+// Condense (increase density)
+await mistborn.CondenseAsync(assetId, DensityLevel.Light);
+
+// Merge assets
+await mistborn.MergeAsync(assetId, otherAssetId);
+
+// Split asset
+await mistborn.SplitAsync(assetId, componentIds);
+```
+
+See [Mistborn API Documentation](Runtime/Haze/Mistborn/README.md) for full API reference.
+
 ## API Reference
 
 ### HazeClient
@@ -202,12 +238,78 @@ Build and sign transactions.
 - `SplitAsset(...)` - Split asset
 - `Sign(MistbornAssetTransaction, KeyPair)` - Sign asset transaction
 
+### MistbornAsset (High-Level API)
+
+Convenient wrapper for Mistborn operations.
+
+**Methods:**
+- `CreateAsync(...)` - Create asset
+- `UpdateAsync(...)` - Update asset
+- `CondenseAsync(...)` - Increase density
+- `EvaporateAsync(...)` - Decrease density
+- `MergeAsync(...)` - Merge assets
+- `SplitAsync(...)` - Split asset
+- `GetAssetAsync(assetId)` - Get asset info
+- `SearchByOwnerAsync()` - Search by owner
+- `SearchByGameIdAsync(gameId)` - Search by game ID
+- `SearchAsync(gameId)` - Search by owner and game ID
+- `EstimateGasAsync(transaction)` - Estimate gas
+
+**Static Helpers:**
+- `CreateAssetId(seed)` - Create asset ID from string/bytes
+- `AssetIdToHex(assetId)` - Convert asset ID to hex
+- `HexToAssetId(hex)` - Convert hex to asset ID
+
+### DensityLimits
+
+Helper for density level limits.
+
+- `GetMaxSize(density)` - Get max size for density
+- `IsWithinLimit(density, size)` - Check if size fits
+- `GetRecommendedDensity(size)` - Get recommended density
+
+## Testing
+
+### Quick Test (No Node Required)
+
+1. Add `MistbornApiTest` component to GameObject
+2. Set `testWithoutNode = true`
+3. Right-click component → **"Run All Mistborn Tests"**
+4. Check Console for results
+
+**Tests:**
+- ✓ Density limits (GetMaxSize, IsWithinLimit, GetRecommendedDensity)
+- ✓ Mistborn API helpers (CreateAssetId, AssetIdToHex, HexToAssetId)
+
+See [QUICK_TEST_MISTBORN.md](QUICK_TEST_MISTBORN.md) for detailed instructions.
+
+### Full Test (With Node)
+
+1. Start HAZE node: `cargo run`
+2. Add `MistbornApiTest` component
+3. Set `testWithoutNode = false`, `nodeUrl = "http://localhost:8080"`
+4. Run tests
+
+**Additional Tests:**
+- ✓ Asset creation and update
+- ✓ Asset search (by owner, by game ID)
+- ✓ Gas estimation
+
+See [TESTING_MISTBORN.md](TESTING_MISTBORN.md) for complete testing guide.
+
 ## Examples
 
 See `Samples~/` folder for complete examples:
-- Basic usage (generate key, get balance, send transfer)
-- Mistborn assets (create, search, update)
-- Economy (pools, swap calculation)
+- **BasicUsage** - Generate key, get balance, send transfer
+- **Mistborn** - Create, search, update assets (with UI scene and simple example)
+- Economy (pools, swap calculation) - Coming in Phase 4.3
+
+### Mistborn Sample Scene
+
+The Mistborn sample includes:
+- `MistbornSampleScene.cs` - Full UI scene (create, list, detail)
+- `MistbornSimpleExample.cs` - Simple code example without UI
+- See `Samples~/Mistborn/README.md` for setup instructions
 
 ## Notes
 
