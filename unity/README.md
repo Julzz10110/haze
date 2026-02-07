@@ -40,12 +40,21 @@ This package requires:
 
 - **Newtonsoft.Json**: JSON serialization (already included in Unity 2020.3+ via Package Manager)
 
+## Configuration
+
+Set the HAZE node base URL so the SDK and samples talk to your node:
+
+- **In code:** pass the URL when creating the client, e.g. `new HazeClient("http://localhost:8080")`.
+- **In samples:** use the `nodeUrl` field in the Inspector (e.g. `http://localhost:8080` for a local node, or your remote API URL).
+
+For WebGL builds, ensure the node allows your game origin in CORS.
+
 ## Quick Start
 
 ### 1. Configure the client
 
 ```csharp
-using Haze.Client;
+using Haze;
 using Haze.Crypto;
 
 // Create client with node URL
@@ -315,6 +324,16 @@ See `Samples~/` folder for complete examples:
 - **BasicUsage** - Generate key, get balance, send transfer
 - **Mistborn** - Create, search, update assets (with UI scene and simple example)
 - **Economy** - List pools, swap quote, create pool ([EconomySimpleExample](Samples~/Economy/EconomySimpleExample.cs))
+
+### Playable sample (address + balance + assets)
+
+One scene demonstrates "login with HAZE" and "fetch/display assets":
+
+- **Mistborn sample scene** — Generate key → show address and balance → list assets by owner → create NFT (optional) → show asset detail.
+- **How to run:** Create a Unity scene with a Canvas (UI). Add `MistbornSampleScene` component to a GameObject and assign the UI references (address text, balance text, create button, refresh button, assets list, asset detail). Set `nodeUrl` (e.g. `http://localhost:8080`). Press Play. See [Samples~/Mistborn/README.md](Samples~/Mistborn/README.md) for full setup.
+- **Code-only alternative:** `BasicUsageExample` shows address + balance; `MistbornSimpleExample` adds asset create/search/update without UI.
+
+See [PLAYABLE_SAMPLE.md](PLAYABLE_SAMPLE.md) for step-by-step instructions.
 
 ### Mistborn Sample Scene
 

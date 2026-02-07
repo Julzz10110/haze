@@ -186,6 +186,12 @@ console.log('State root:', info.state_root);
 console.log('Last finalized height:', info.last_finalized_height);
 ```
 
+### Unity SDK
+
+A C# SDK for Unity is available in the `unity/` package. It provides an HTTP client for the HAZE API, Ed25519 key/wallet helpers, transaction build/sign/send, Mistborn asset helpers, and Fog Economy (pools, swap quote).
+
+**Docs and playable sample:** [unity/README.md](unity/README.md) — installation, configuration, and a playable sample (address, balance, list/create assets). See [unity/PLAYABLE_SAMPLE.md](unity/PLAYABLE_SAMPLE.md) for step-by-step instructions.
+
 #### Multi-node e2e / load test
 
 After starting multiple nodes locally (see multi-node scripts), you can run a simple multi-node
