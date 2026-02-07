@@ -192,6 +192,12 @@ A C# SDK for Unity is available in the `unity/` package. It provides an HTTP cli
 
 **Docs and playable sample:** [unity/README.md](unity/README.md) — installation, configuration, and a playable sample (address, balance, list/create assets). See [unity/PLAYABLE_SAMPLE.md](unity/PLAYABLE_SAMPLE.md) for step-by-step instructions.
 
+### Unreal Engine
+
+A C++ plugin for Unreal Engine 5 is available in `unreal/`. It provides an HTTP client for the HAZE API, KeyPair (Ed25519 when linked), and transaction build/sign/send (Transfer, MistbornAsset Create). Same REST and transaction contract as the node and Unity SDK.
+
+**Install:** Copy the `unreal` folder into your project's `Plugins` directory and enable the plugin. **Docs:** [unreal/README.md](unreal/README.md) — installation, configuration, Ed25519 setup for signing, and C++/Blueprint usage.
+
 #### Multi-node e2e / load test
 
 After starting multiple nodes locally (see multi-node scripts), you can run a simple multi-node

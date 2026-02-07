@@ -1,0 +1,38 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "HAZE Blockchain",
+	"Description": "C++ plugin for HAZE blockchain: HTTP client, Ed25519 signing, Mistborn assets, Fog Economy. Same REST and transaction contract as the node and Unity SDK.",
+	"Category": "Plugins",
+	"CreatedBy": "HAZE Blockchain",
+	"CreatedByURL": "https://github.com/haze-blockchain/haze",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "HazeBlockchain",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "HTTP",
+			"Enabled": true
+		},
+		{
+			"Name": "JSON",
+			"Enabled": true
+		},
+		{
+			"Name": "JSONUtilities",
+			"Enabled": true
+		}
+	]
+}
