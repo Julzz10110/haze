@@ -268,6 +268,18 @@ Helper for density level limits.
 - `IsWithinLimit(density, size)` - Check if size fits
 - `GetRecommendedDensity(size)` - Get recommended density
 
+### FogEconomy (Economy client)
+
+High-level client for liquidity pools and swap quotes.
+
+- `GetPoolsAsync()` - Get all liquidity pools
+- `GetPoolAsync(poolId)` - Get pool by ID
+- `CreatePoolAsync(asset1, asset2, reserve1, reserve2, feeRate)` - Create pool
+- `FogEconomy.ComputeSwapOutput(pool, inputAmount, isAsset1Input)` - Swap quote (constant product, fee on output)
+- `FogEconomy.ComputeLiquidityShares(pool, amount1, amount2)` - Liquidity shares for add liquidity
+
+See [Economy README](Runtime/Haze/Economy/README.md).
+
 ## Testing
 
 ### Quick Test (No Node Required)
@@ -302,7 +314,7 @@ See [TESTING_MISTBORN.md](TESTING_MISTBORN.md) for complete testing guide.
 See `Samples~/` folder for complete examples:
 - **BasicUsage** - Generate key, get balance, send transfer
 - **Mistborn** - Create, search, update assets (with UI scene and simple example)
-- Economy (pools, swap calculation) - Coming in Phase 4.3
+- **Economy** - List pools, swap quote, create pool ([EconomySimpleExample](Samples~/Economy/EconomySimpleExample.cs))
 
 ### Mistborn Sample Scene
 
